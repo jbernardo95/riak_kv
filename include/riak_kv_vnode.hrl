@@ -1,6 +1,5 @@
 -include_lib("riak_core/include/riak_core_vnode.hrl").
 
-
 -record(riak_kv_w1c_put_reply_v1, {
     reply :: ok | {error, term()},
     type :: primary | fallback

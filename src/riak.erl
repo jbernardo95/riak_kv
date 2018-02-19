@@ -191,7 +191,7 @@ client_test_phase2(Client, Object0) ->
     Now = calendar:universal_time(),
     Object = riak_object:update_value(Object0, Now),
     case Client:put(Object, 1) of
-        ok ->
+        {ok, _Timestamp} ->
             client_test_phase3(Client, Now);
         Error ->
             io:format("Failed to write test value: ~p", [Error]),

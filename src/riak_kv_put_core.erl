@@ -42,6 +42,7 @@
 -type idxresult() :: {non_neg_integer(), result()}.
 -type idx_type() :: [{non_neg_integer, 'primary' | 'fallback'}].
 -record(putcore, {n :: pos_integer(),
+                  timestamp :: non_neg_integer(),
                   w :: non_neg_integer(),
                   dw :: non_neg_integer(),
                   pw :: non_neg_integer(),
@@ -71,6 +72,7 @@
 init(N, W, PW, DW, PWFailThreshold,
      DWFailThreshold, AllowMult, ReturnBody, IdxType) ->
     #putcore{n = N, w = W, pw = PW, dw = DW,
+             timestamp = 0,
              pw_fail_threshold = PWFailThreshold,
              dw_fail_threshold = DWFailThreshold,
              allowmult = AllowMult,
@@ -79,20 +81,31 @@ init(N, W, PW, DW, PWFailThreshold,
 
 %% Add a result from the vnode
 -spec add_result(vput_result(), putcore()) -> putcore().
-add_result({w, Idx, _ReqId}, PutCore = #putcore{results = Results,
-                                                num_w = NumW}) ->
+add_result({w, Idx, _ReqId, Timestamp},
+           PutCore = #putcore{results = Results,
+                              num_w = NumW,
+                              timestamp = Timestamp1}) when Timestamp1 == 0 ->
+    PutCore#putcore{results = [{Idx, w} | Results],
+                    num_w = NumW + 1,
+                    timestamp = Timestamp};
+add_result({w, Idx, _ReqId, _Timestamp},
+           PutCore = #putcore{results = Results,
+                              num_w = NumW}) ->
     PutCore#putcore{results = [{Idx, w} | Results],
                     num_w = NumW + 1};
-add_result({dw, Idx, _ReqId}, PutCore = #putcore{results = Results,
-                                                 num_dw = NumDW}) ->
+add_result({dw, Idx, _ReqId},
+           PutCore = #putcore{results = Results,
+                              num_dw = NumDW}) ->
     num_pw(PutCore#putcore{results = [{Idx, {dw, undefined}} | Results],
-                    num_dw = NumDW + 1}, Idx);
-add_result({dw, Idx, ResObj, _ReqId}, PutCore = #putcore{results = Results,
-                                                         num_dw = NumDW}) ->
+                           num_dw = NumDW + 1}, Idx);
+add_result({dw, Idx, ResObj, _ReqId},
+           PutCore = #putcore{results = Results,
+                              num_dw = NumDW}) ->
     num_pw(PutCore#putcore{results = [{Idx, {dw, ResObj}} | Results],
-                    num_dw = NumDW + 1}, Idx);
-add_result({fail, Idx, _ReqId}, PutCore = #putcore{results = Results,
-                                                   num_fail = NumFail}) ->
+                           num_dw = NumDW + 1}, Idx);
+add_result({fail, Idx, _ReqId},
+           PutCore = #putcore{results = Results,
+                              num_fail = NumFail}) ->
     PutCore#putcore{results = [{Idx, {error, undefined}} | Results],
                     num_fail = NumFail + 1};
 add_result(_Other, PutCore = #putcore{num_fail = NumFail}) ->
@@ -180,11 +193,11 @@ result_idx(_)              -> -1.
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-maybe_return_body(PutCore = #putcore{returnbody = false}) ->
-    {ok, PutCore};
-maybe_return_body(PutCore = #putcore{returnbody = true}) ->
+maybe_return_body(PutCore = #putcore{returnbody = false, timestamp = Timestamp}) ->
+    {{ok, Timestamp}, PutCore};
+maybe_return_body(PutCore = #putcore{returnbody = true, timestamp = Timestamp}) ->
     {ReplyObj, UpdPutCore} = final(PutCore),
-    {{ok, ReplyObj}, UpdPutCore}.
+    {{ok, Timestamp, ReplyObj}, UpdPutCore}.
 
 %% @private Checks IdxType to see if Idx is a primary.
 %% If the Idx is not in the IdxType the world must be
