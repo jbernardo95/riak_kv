@@ -1,0 +1,38 @@
+#!/usr/bin/env escript
+
+main([DataPath, MaxNBytes, MaxNFiles]) ->
+    consume(DataPath, list_to_integer(MaxNBytes), list_to_integer(MaxNFiles)),
+    halt(0);
+
+main(_) ->
+    usage().
+
+consume(DataPath, MaxNBytes, MaxNFiles) ->
+    DiskLogOptions = [
+        {name, riak_kv_log},
+        {file, DataPath ++ "/data"},
+        {repair, true},
+        {type, wrap},
+        {size, {MaxNBytes, MaxNFiles}},
+        {format, internal},
+        {mode, read_only}
+    ],
+    {ok, Log} = disk_log:open(DiskLogOptions),
+
+    Terms = read_log_content(Log),
+    io:fwrite("~p ~n", [Terms]),
+
+    disk_log:close(Log).
+
+read_log_content(Log) ->
+    read_log_content(Log, start, []).
+
+read_log_content(Log, Continuation, Terms) ->
+    case disk_log:chunk(Log, Continuation) of
+        eof -> Terms;
+        {Continuation1, Terms1} -> read_log_content(Log, Continuation1, Terms1 ++ Terms)
+    end.
+
+usage() ->
+    io:format("Usage: read_log data_path max_n_bytes, max_n_files\n"),
+    halt(1).
