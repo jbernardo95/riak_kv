@@ -87,6 +87,7 @@
 -include_lib("riak_kv_map_phase.hrl").
 -include_lib("riak_core_pb.hrl").
 -include("riak_kv_types.hrl").
+-include("riak_kv_log.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -141,7 +142,8 @@
                 md_cache_size :: pos_integer(),
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
-                update_hook = riak_kv_noop_update_hook :: update_hook()
+                update_hook = riak_kv_noop_update_hook :: update_hook(),
+                heartbeat_interval :: non_neg_integer()
                }).
 
 -type index_op() :: add | remove.
@@ -482,6 +484,9 @@ init([Index]) ->
                 lager:debug("No metadata cache size defined, not starting"),
                 undefined
         end,
+    {ok, LogOptions} = application:get_env(riak_kv, log),
+    LogOptionsDict = dict:from_list(LogOptions),
+    HeartbeatInterval = dict:fetch(heartbeat_interval, LogOptionsDict),
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
@@ -507,8 +512,10 @@ init([Index]) ->
                            mrjobs=dict:new(),
                            md_cache=MDCache,
                            md_cache_size=MDCacheSize,
-                           update_hook=update_hook()},
+                           update_hook=update_hook(),
+                           heartbeat_interval = HeartbeatInterval},
             try_set_vnode_lock_limit(Index),
+            send_heartbeat_after(HeartbeatInterval),
             case AsyncFolding of
                 true ->
                     %% Create worker pool initialization tuple
@@ -765,6 +772,22 @@ handle_command({mapexec_reply, JobId, Result}, _Sender, #state{mrjobs=Jobs}=Stat
 handle_command({reformat_object, BKey}, _Sender, State) ->
     {Reply, UpdState} = do_reformat(BKey, State),
     {reply, Reply, UpdState};
+
+handle_command(send_heartbeat, _Sender, 
+               #state{idx = Idx,
+                      maximum_timestamp_used = MaximumTimestampUsed,
+                      heartbeat_interval = HeartbeatInterval} = State) ->
+    % Send heartbeat to riak_kv_log
+    PhysicalTimestamp = riak_kv_util:get_timestamp(),
+    MaximumTimestampUsed1 = max(PhysicalTimestamp, MaximumTimestampUsed),
+    %lager:info("Sending heartbeat to riak_kv_log from partition ~p with clock ~p ~n", [Idx, MaximumTimestampUsed1]),
+    riak_kv_log:heartbeat(Idx, MaximumTimestampUsed1),
+
+    % Schedule next heartbeat sending
+    send_heartbeat_after(HeartbeatInterval),
+
+    NewState = State#state{maximum_timestamp_used = MaximumTimestampUsed1},
+    {noreply, NewState};
 
 handle_command(Req, Sender, State) ->
     handle_request(riak_kv_requests:request_type(Req), Req, Sender, State).
@@ -1301,6 +1324,10 @@ ready_to_exit() ->
     [] =:= riak_kv_ensembles:local_ensembles().
 
 %% @private
+send_heartbeat_after(HeartbeatInterval) ->
+    riak_core_vnode:send_command_after(HeartbeatInterval, send_heartbeat).
+
+%% @private
 forward_put({Idx, Node}, Key, Obj, From) ->
     Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
     riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_put, Key, Obj, From}),
@@ -1329,10 +1356,12 @@ handle_put_request(Req, Sender,
     PhysicalTimestamp = riak_kv_util:get_timestamp(),
     ReqTimestamp = max(ClientClock + 1, max(MaximumTimestampUsed + 1, PhysicalTimestamp)),
 
-    % TODO propagate update to log
+    % Append record to log
+    ReqId = riak_kv_requests:get_request_id(Req),
+    Record = riak_kv_log:new_log_record(ReqId, ReqTimestamp),
+    riak_kv_log:append_record(Record, Idx),
 
     % Respond to client
-    ReqId = riak_kv_requests:get_request_id(Req),
     riak_core_vnode:reply(Sender, {w, Idx, ReqId, ReqTimestamp}),
 
     % Store put
@@ -2927,7 +2956,5 @@ rollover_test_() ->
                end}
              ]}
     }.
-
-
 
 -endif.

@@ -28,7 +28,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0]).
+-export([start_link/0, start_log/0]).
 -export([init/1]).
 
 -define (IF (Bool, A, B), if Bool -> A; true -> B end).
@@ -37,6 +37,12 @@
 %% @doc API for starting the supervisor.
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+
+start_log() ->
+    Log = {riak_kv_log,
+            {riak_kv_log, start_link, []},
+            permanent, 5000, worker, [riak_kv_log]},
+    supervisor:start_child(?MODULE, Log).
 
 %% @spec init([]) -> SupervisorTree
 %% @doc supervisor callback.
@@ -63,29 +69,29 @@ init([]) ->
                     permanent, 30000, worker, [riak_kv_js_manager]},
     HookJSPool = {?JSPOOL_HOOK,
                   {riak_kv_js_manager, start_link,
-                  [?JSPOOL_HOOK, read_js_pool_size(hook_js_vm_count, "hook callback")]},
+                   [?JSPOOL_HOOK, read_js_pool_size(hook_js_vm_count, "hook callback")]},
                   permanent, 30000, worker, [riak_kv_js_manager]},
     HTTPCache = {riak_kv_http_cache,
-		 {riak_kv_http_cache, start_link, []},
-		 permanent, 5000, worker, [riak_kv_http_cache]},
+                 {riak_kv_http_cache, start_link, []},
+                 permanent, 5000, worker, [riak_kv_http_cache]},
     JSSup = {riak_kv_js_sup,
              {riak_kv_js_sup, start_link, []},
              permanent, infinity, supervisor, [riak_kv_js_sup]},
     FastPutSup = {riak_kv_w1c_sup,
-                 {riak_kv_w1c_sup, start_link, []},
-                 permanent, infinity, supervisor, [riak_kv_w1c_sup]},
+                  {riak_kv_w1c_sup, start_link, []},
+                  permanent, infinity, supervisor, [riak_kv_w1c_sup]},
     DeleteSup = {riak_kv_delete_sup,
                  {riak_kv_delete_sup, start_link, []},
                  permanent, infinity, supervisor, [riak_kv_delete_sup]},
     BucketsFsmSup = {riak_kv_buckets_fsm_sup,
-                 {riak_kv_buckets_fsm_sup, start_link, []},
-                 permanent, infinity, supervisor, [riak_kv_buckets_fsm_sup]},
+                     {riak_kv_buckets_fsm_sup, start_link, []},
+                     permanent, infinity, supervisor, [riak_kv_buckets_fsm_sup]},
     KeysFsmSup = {riak_kv_keys_fsm_sup,
-                 {riak_kv_keys_fsm_sup, start_link, []},
-                 permanent, infinity, supervisor, [riak_kv_keys_fsm_sup]},
+                  {riak_kv_keys_fsm_sup, start_link, []},
+                  permanent, infinity, supervisor, [riak_kv_keys_fsm_sup]},
     GroupKeysFsmSup = {riak_kv_group_list_fsm_sup,
-                {riak_kv_group_list_fsm_sup, start_link, []},
-                 permanent, infinity, supervisor, [riak_kv_group_list_fsm_sup]},
+                       {riak_kv_group_list_fsm_sup, start_link, []},
+                       permanent, infinity, supervisor, [riak_kv_group_list_fsm_sup]},
     IndexFsmSup = {riak_kv_index_fsm_sup,
                    {riak_kv_index_fsm_sup, start_link, []},
                    permanent, infinity, supervisor, [riak_kv_index_fsm_sup]},
@@ -96,13 +102,13 @@ init([]) ->
                       {riak_kv_entropy_manager, start_link, []},
                       permanent, 30000, worker, [riak_kv_entropy_manager]},
 
-    EnsemblesKV =  {riak_kv_ensembles,
-                    {riak_kv_ensembles, start_link, []},
-                    permanent, 30000, worker, [riak_kv_ensembles]},
+    EnsemblesKV = {riak_kv_ensembles,
+                   {riak_kv_ensembles, start_link, []},
+                   permanent, 30000, worker, [riak_kv_ensembles]},
 
-    Sweeper  = {riak_kv_sweeper,
-                {riak_kv_sweeper, start_link, []},
-                permanent, 30000, worker, [riak_kv_sweeper]},
+    Sweeper = {riak_kv_sweeper,
+               {riak_kv_sweeper, start_link, []},
+               permanent, 30000, worker, [riak_kv_sweeper]},
 
     % Figure out which processes we should run...
     HasStorageBackend = (app_helper:get_env(riak_kv, storage_backend) /= undefined),

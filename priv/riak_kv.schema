@@ -417,18 +417,15 @@
 %% * 1: Riak 1.4, default buckets, and earlier default - may duplicate siblings
 %%      from interleaved writes (sibling explosion.)
 {mapping, "buckets.default.merge_strategy", "riak_core.default_bucket_props.dvv_enabled", [
-  {default, '1'},
   {datatype, {flag, '2', '1'}},
+  {default, '1'},
   hidden
 ]}.
 
-%% @doc The number of primary replicas (non-fallback) that must reply
-%% to a read request.
-{mapping, "buckets.default.pr", "riak_core.default_bucket_props.pr", [
-  {datatype, [integer, {enum, [quorum, all]}]},
-  {default, 0},
-  hidden
-]}.
+% Override riak_core default value for n_val.
+% This value is overridden to 1 to make sure vnodes are responsible for
+% independent key value pairs.
+{translation, "riak_core.default_bucket_props.n_val", fun(_Conf) -> 1 end}.
 
 %% @doc The number of replicas which must reply to a read request.
 {mapping, "buckets.default.r", "riak_core.default_bucket_props.r", [
@@ -442,6 +439,14 @@
 {mapping, "buckets.default.w", "riak_core.default_bucket_props.w", [
   {datatype, [{enum, [quorum, all]}, integer]},
   {default, quorum},
+  hidden
+]}.
+
+%% @doc The number of primary replicas (non-fallback) that must reply
+%% to a read request.
+{mapping, "buckets.default.pr", "riak_core.default_bucket_props.pr", [
+  {datatype, [integer, {enum, [quorum, all]}]},
+  {default, 0},
   hidden
 ]}.
 
@@ -783,4 +788,28 @@
     {datatype, {flag, enabled, disabled}},
     {default, enabled},
     {commented, enabled}
+]}.
+
+{mapping, "riak_kv.log.data_path", "riak_kv.log.data_path", [
+    {datatype, string},
+    {default, "/Users/jb/Desktop/riak_kv_log"},
+    {commented, "/path/to/log/data"}
+]}.
+
+{mapping, "riak_kv.log.max_n_bytes", "riak_kv.log.max_n_bytes", [
+    {datatype, integer},
+    {default, 1000000000},
+    {commented, 1000000000}
+]}.
+
+{mapping, "riak_kv.log.max_n_files", "riak_kv.log.max_n_files", [
+    {datatype, integer},
+    {default, 10},
+    {commented, 10}
+]}.
+
+{mapping, "riak_kv.log.heartbeat_interval", "riak_kv.log.heartbeat_interval", [
+    {datatype, integer},
+    {default, 5000},
+    {commented, 5000}
 ]}.
