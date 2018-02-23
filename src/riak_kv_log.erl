@@ -16,7 +16,6 @@
 
 -include("riak_kv_log.hrl").
 
--define(SERVER, ?MODULE).
 -define(Pending_Records_Table_Name, labels).
 
 -record(state, {heartbeats, tid, log}).
@@ -29,11 +28,14 @@
 start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
+
 append_record(Record, Partition)->
     gen_server:cast({global, ?MODULE}, {append_record, Record, Partition}).
 
+
 heartbeat(Partition, Clock)->
     gen_server:cast({global, ?MODULE}, {heartbeat, Partition, Clock}).
+
 
 new_log_record(ReqId, Timestamp) ->
     #log_record{req_id = ReqId, timestamp = Timestamp}.

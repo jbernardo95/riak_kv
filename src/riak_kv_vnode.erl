@@ -1364,9 +1364,14 @@ handle_put_request(Req, Sender,
     % Respond to client
     riak_core_vnode:reply(Sender, {w, Idx, ReqId, ReqTimestamp}),
 
-    % Store put
+    % Attach timestamp to object
+    Object = riak_kv_requests:get_object(Req),
+    Object1 = riak_object:set_timestamp(Object, ReqTimestamp),
+
+    % Store object 
     NewState1 = State#state{maximum_timestamp_used = ReqTimestamp},
-    {Reply, NewState} = do_put(Sender, Req, NewState1),
+    Req1 = riak_kv_requests:set_object(Req, Object1),
+    {Reply, NewState} = do_put(Sender, Req1, NewState1),
 
     update_vnode_stats(vnode_put, Idx, StartTS),
     {Reply, NewState}.
