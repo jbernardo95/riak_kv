@@ -791,9 +791,9 @@
 ]}.
 
 {mapping, "riak_kv.log.data_path", "riak_kv.log.data_path", [
-    {datatype, string},
-    {default, "/Users/jb/Desktop/riak_kv_log"},
-    {commented, "/path/to/log/data"}
+    {datatype, directory},
+    {default, "$(platform_data_dir)/log"},
+    hidden
 ]}.
 
 {mapping, "riak_kv.log.max_n_bytes", "riak_kv.log.max_n_bytes", [

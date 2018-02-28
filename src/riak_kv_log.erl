@@ -66,9 +66,11 @@ init(_Args) ->
     % Open log
     {ok, LogOptions} = application:get_env(riak_kv, log),
     LogOptionsDict = dict:from_list(LogOptions),
+    LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/data",
+    ok = filelib:ensure_dir(LogFile),
     DiskLogOptions = [
         {name, riak_kv_log},
-        {file, dict:fetch(data_path, LogOptionsDict) ++ "/data"},
+        {file, LogFile},
         {repair, true},
         {type, wrap},
         {size, {dict:fetch(max_n_bytes, LogOptionsDict), dict:fetch(max_n_files, LogOptionsDict)}},
