@@ -95,7 +95,7 @@ handle_cast(
   {append_record, #log_record{timestamp = Timestamp} = Record, Partition},
   #state{heartbeats = Heartbeats} = State
  )->
-    lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
+    %lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
 
     % Insert record in ets table
     ets:insert(?Pending_Records_Table_Name, {{Timestamp, Partition}, Record}),
