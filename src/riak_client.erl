@@ -46,6 +46,7 @@
 -export([get_client_id/1]).
 -export([for_dialyzer_only_ignore/3]).
 -export([ensemble/1]).
+-export([sequencer_next/1]).
 
 -compile({no_auto_import,[put/2]}).
 %% @type default_timeout() = 60000
@@ -62,6 +63,9 @@
 -type riak_client() :: term().
 
 -export_type([riak_client/0]).
+
+sequencer_next({?MODULE, [_Node, _ClientId]}) ->
+    riak_kv_sequencer:next().
 
 %% @spec new(Node, ClientId) -> riak_client()
 %% @doc Return a riak client instance.

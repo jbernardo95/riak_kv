@@ -28,7 +28,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, start_log/0]).
+-export([start_link/0, start_log/0, start_sequencer/0]).
 -export([init/1]).
 
 -define (IF (Bool, A, B), if Bool -> A; true -> B end).
@@ -43,6 +43,12 @@ start_log() ->
             {riak_kv_log, start_link, []},
             permanent, 5000, worker, [riak_kv_log]},
     supervisor:start_child(?MODULE, Log).
+
+start_sequencer() ->
+    Sequencer = {riak_kv_sequencer,
+                 {riak_kv_sequencer, start_link, []},
+                 permanent, 5000, worker, [riak_kv_sequencer]},
+    supervisor:start_child(?MODULE, Sequencer).
 
 %% @spec init([]) -> SupervisorTree
 %% @doc supervisor callback.
