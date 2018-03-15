@@ -16,7 +16,7 @@
 
 -include("riak_kv_log.hrl").
 
--define(Pending_Records_Table_Name, labels).
+-define(PENDING_RECORDS_TABLE, pending_records).
 
 -record(state, {heartbeats, tid, log}).
 
@@ -52,7 +52,6 @@ init(_Args) ->
     Heartbeats = lists:foldl(
         fun(PrefList, Dict) ->
             {Partition, _Node} = hd(PrefList),
-            %riak_kv_vnode:heartbeat(PrefList),
             dict:store(Partition, 0, Dict)
         end,
         dict:new(),
@@ -61,7 +60,7 @@ init(_Args) ->
 
     % Create ets table to store unstable records 
     EtsTableOptions = [ordered_set, named_table, private],
-    Tid = ets:new(?Pending_Records_Table_Name, EtsTableOptions),
+    Tid = ets:new(?PENDING_RECORDS_TABLE, EtsTableOptions),
 
     % Open log
     {ok, LogOptions} = application:get_env(riak_kv, log),
@@ -77,8 +76,10 @@ init(_Args) ->
         {format, internal},
         {mode, read_write}
     ],
-    lager:error("Disk log options ~p ~n", [DiskLogOptions]),
+    lager:info("Disk log options ~p ~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
+
+    erlang:send(self(), append_stable_records_to_the_log),
     
     State = #state{heartbeats = Heartbeats,
                    tid = Tid,
@@ -94,13 +95,10 @@ handle_call(
     %lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
 
     % Insert record in ets table
-    ets:insert(?Pending_Records_Table_Name, {{Timestamp, Partition}, Record}),
+    ets:insert(?PENDING_RECORDS_TABLE, {{Timestamp, Partition}, Record}),
 
     % Store heartbeat from partition
     Heartbeats1 = dict:store(Partition, Timestamp, Heartbeats),
-
-    % Insert stable records into the log
-    append_stable_records_to_the_log(State),
 
     State1 = State#state{heartbeats = Heartbeats1},
     {reply, ok, State1};
@@ -117,9 +115,6 @@ handle_cast(
     % Store hearbeat from partition
     Heartbeats1 = dict:store(Partition, Clock, Heartbeats),
 
-    % Insert stable records into the log
-    append_stable_records_to_the_log(State),
-
     State1 = State#state{heartbeats = Heartbeats1},
     {noreply, State1};
 
@@ -128,6 +123,11 @@ handle_cast(_Request, State) ->
     lager:error("Unexpected message received at hanlde_cast~n"),
     {noreply, State}.
 
+
+handle_info(append_stable_records_to_the_log, State) ->
+    append_stable_records_to_the_log(State),
+    erlang:send_after(1000, self(), append_stable_records_to_the_log),
+    {noreply, State};
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -165,14 +165,15 @@ append_stable_records_to_the_log(#state{heartbeats = Heartbeats} = State) ->
     append_stable_records_to_the_log(StableTimestamp, State).
 
 append_stable_records_to_the_log(StableTimestamp, #state{log = Log} = State) ->
-    case ets:first(?Pending_Records_Table_Name) of
+    case ets:first(?PENDING_RECORDS_TABLE) of
         {Timestamp, _Partition} = Key when Timestamp =< StableTimestamp ->
-            disk_log:log(Log, Key),
-            ets:delete(?Pending_Records_Table_Name, Key),
+            Record = ets:lookup(?PENDING_RECORDS_TABLE, Key),
+            disk_log:log(Log, Record),
+            ets:delete(?PENDING_RECORDS_TABLE, Key),
             append_stable_records_to_the_log(StableTimestamp, State);
 
         _ ->
-            %lager:info("Stable records appended to the log~n", []),
+            lager:info("Stable records appended to the log (~p)~n", [StableTimestamp]),
             disk_log:sync(Log),
             ok
     end.
