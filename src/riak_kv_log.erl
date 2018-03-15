@@ -30,7 +30,7 @@ start_link() ->
 
 
 append_record(Record, Partition)->
-    gen_server:cast({global, ?MODULE}, {append_record, Record, Partition}).
+    gen_server:call({global, ?MODULE}, {append_record, Record, Partition}).
 
 
 heartbeat(Partition, Clock)->
@@ -86,13 +86,9 @@ init(_Args) ->
     {ok, State}.
 
 
-handle_call(_Request, _From, State) ->
-    lager:error("Unexpected message received at hanlde_call~n"),
-    {reply, ok, State}.
-
-
-handle_cast(
+handle_call(
   {append_record, #log_record{timestamp = Timestamp} = Record, Partition},
+  _From,
   #state{heartbeats = Heartbeats} = State
  )->
     %lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
@@ -107,7 +103,11 @@ handle_cast(
     append_stable_records_to_the_log(State),
 
     State1 = State#state{heartbeats = Heartbeats1},
-    {noreply, State1};
+    {reply, ok, State1};
+
+handle_call(_Request, _From, State) ->
+    lager:error("Unexpected message received at hanlde_call~n"),
+    {reply, ok, State}.
 
 
 handle_cast(
