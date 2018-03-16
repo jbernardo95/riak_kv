@@ -46,6 +46,7 @@
 -export([get_client_id/1]).
 -export([for_dialyzer_only_ignore/3]).
 -export([ensemble/1]).
+-export([append_to_log/4]).
 
 -compile({no_auto_import,[put/2]}).
 %% @type default_timeout() = 60000
@@ -62,6 +63,10 @@
 -type riak_client() :: term().
 
 -export_type([riak_client/0]).
+
+append_to_log(ReqId, Timestamp, Partition, {?MODULE, [_Node, _ClientId]}) ->
+    Record = riak_kv_log:new_log_record(ReqId, Timestamp),
+    riak_kv_log:append_record(Record, Partition).
 
 %% @spec new(Node, ClientId) -> riak_client()
 %% @doc Return a riak client instance.
