@@ -47,16 +47,7 @@ new_log_record(ReqId, Timestamp) ->
 
 init(_Args) ->
     % Initialize heartbeats dictionary
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    PrefLists = riak_core_ring:all_preflists(Ring, 1),
-    Heartbeats = lists:foldl(
-        fun(PrefList, Dict) ->
-            {Partition, _Node} = hd(PrefList),
-            dict:store(Partition, 0, Dict)
-        end,
-        dict:new(),
-        PrefLists
-    ),
+    Heartbeats = dict:new(),
 
     % Create ets table to store unstable records 
     EtsTableOptions = [ordered_set, named_table, private],
@@ -109,14 +100,10 @@ handle_call(_Request, _From, State) ->
 
 
 handle_cast(
-  {heartbeat, Partition, Clock},
-  #state{heartbeats = Heartbeats} = State
+  {heartbeat, _Partition, _Clock},
+  State
  )->
-    % Store hearbeat from partition
-    Heartbeats1 = dict:store(Partition, Clock, Heartbeats),
-
-    State1 = State#state{heartbeats = Heartbeats1},
-    {noreply, State1};
+    {noreply, State};
 
 
 handle_cast(_Request, State) ->
@@ -148,6 +135,11 @@ code_change(_OldVsn, State, _Extra) ->
 
 get_stable_timestamp(Heartbeats) ->
     HeartbeatsList = dict:to_list(Heartbeats),
+    do_get_stable_timestamp(HeartbeatsList).
+
+do_get_stable_timestamp([]) ->
+    0;
+do_get_stable_timestamp(HeartbeatsList) ->
     {_Partition, Clock} = hd(HeartbeatsList),
     lists:foldl(
         fun({_Partition1, Clock1}, Min) ->
