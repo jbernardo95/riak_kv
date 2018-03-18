@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0,
-         append_record/2,
+         append_records/2,
          heartbeat/2,
          new_log_record/2]).
 
@@ -29,8 +29,8 @@ start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
 
-append_record(Record, Partition)->
-    gen_server:call({global, ?MODULE}, {append_record, Record, Partition}).
+append_records(Records, Partition)->
+    gen_server:call({global, ?MODULE}, {append_records, Records, Partition}).
 
 
 heartbeat(Partition, Clock)->
@@ -79,17 +79,21 @@ init(_Args) ->
 
 
 handle_call(
-  {append_record, #log_record{timestamp = Timestamp} = Record, Partition},
+  {append_records, Records, Partition},
   _From,
   #state{heartbeats = Heartbeats} = State
  )->
-    %lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
-
-    % Insert record in ets table
-    ets:insert(?PENDING_RECORDS_TABLE, {{Timestamp, Partition}, Record}),
-
+    %lager:info("Received ~p records to append from partition ~p ~n", [length(Records), Partition]),
+    
+    % Insert records in ets table 
+    F = fun(#log_record{timestamp = Timestamp} = Record) -> 
+                ets:insert(?PENDING_RECORDS_TABLE, {{Timestamp, Partition}, Record})
+        end,
+    lists:foreach(F, Records),
+    
     % Store heartbeat from partition
-    Heartbeats1 = dict:store(Partition, Timestamp, Heartbeats),
+    #log_record{timestamp = LastTimestamp} = lists:last(Records),
+    Heartbeats1 = dict:store(Partition, LastTimestamp, Heartbeats),
 
     State1 = State#state{heartbeats = Heartbeats1},
     {reply, ok, State1};
