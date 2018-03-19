@@ -160,7 +160,7 @@ append_stable_records_to_the_log(StableTimestamp, #state{log = Log} = State) ->
     case ets:first(?PENDING_RECORDS_TABLE) of
         {Timestamp, _Partition} = Key when Timestamp =< StableTimestamp ->
             Record = ets:lookup(?PENDING_RECORDS_TABLE, Key),
-            disk_log:log(Log, Record),
+            disk_log:alog(Log, Record),
             ets:delete(?PENDING_RECORDS_TABLE, Key),
             append_stable_records_to_the_log(StableTimestamp, State);
 
