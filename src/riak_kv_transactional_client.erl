@@ -5,6 +5,8 @@
 -export([start_link/1,
          get/2,
          put/3,
+         begin_transaction/1,
+         commit_transaction/1,
          print_state/1]).
 
 -export([init/1,
@@ -16,7 +18,7 @@
 
 -define(DefaultBucket, <<"default_bucket">>).
 
--record(state, {client, clock}).
+-record(state, {client, clock, in_transaction}).
 
 
 %%%===================================================================
@@ -32,6 +34,12 @@ get(Key, Client) when is_list(Key) ->
 put(Key, Value, Client) when is_list(Key) ->
     gen_server:call(Client, {put, list_to_binary(Key), Value}).
 
+begin_transaction(Client) ->
+    gen_server:call(Client, begin_transaction).
+
+commit_transaction(Client) ->
+    gen_server:call(Client, commit_transaction).
+
 print_state(Client) ->
     gen_server:cast(Client, print_state).
 
@@ -43,7 +51,9 @@ print_state(Client) ->
 init(Node) ->
     case riak:client_connect(Node) of
         {ok, Client} ->
-            State = #state{client = Client, clock = 0},
+            State = #state{client = Client,
+                           clock = 0,
+                           in_transaction = false},
             {ok, State};
 
         _ ->
@@ -65,12 +75,24 @@ handle_call({put, Key, Value}, _From, #state{client = Client, clock = Clock} = S
     NewState = State#state{clock = Timestamp},
     {reply, ok, NewState};
 
+handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
+    NewState = State#state{in_transaction = true},
+    {reply, ok, NewState};
+handle_call(begin_transaction, _From, State) ->
+    {reply, {error, in_transaction}, State};
+
+handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
+    {reply, {error, not_in_transaction}, State};
+handle_call(commit_transaction, _From, State) ->
+    NewState = State#state{in_transaction = false},
+    {reply, ok, NewState};
+
 handle_call(_Request, _From, State) ->
     lager:error("Unexpected message received at hanlde_call~n"),
     {reply, ok, State}.
 
 
-handle_cast(print_state, _From, State) ->
+handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
     {noreply, State};
 
