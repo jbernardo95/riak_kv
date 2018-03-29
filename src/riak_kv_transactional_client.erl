@@ -18,7 +18,7 @@
 
 -define(DefaultBucket, <<"default_bucket">>).
 
--record(state, {client, clock, in_transaction}).
+-record(state, {client, clock, in_transaction, snapshot}).
 
 
 %%%===================================================================
@@ -53,7 +53,8 @@ init(Node) ->
         {ok, Client} ->
             State = #state{client = Client,
                            clock = 0,
-                           in_transaction = false},
+                           in_transaction = false,
+                           snapshot = nil},
             {ok, State};
 
         _ ->
@@ -61,6 +62,19 @@ init(Node) ->
     end.
 
 
+% Transactional get
+handle_call(
+  {get, Key},
+  _From,
+  #state{client = Client, clock = Clock, in_transaction = true, snapshot = nil} = State
+ ) ->
+    {ok, Object} = Client:get(?DefaultBucket, Key),
+    Timestamp = riak_object:get_timestamp(Object),
+
+    NewState = State#state{snapshot = max(Clock, Timestamp)},
+    {reply, {ok, Object}, NewState};
+
+% Normal get
 handle_call({get, Key}, _From, #state{client = Client, clock = Clock} = State) ->
     {ok, Object} = Client:get(?DefaultBucket, Key),
     Timestamp = riak_object:get_timestamp(Object),
@@ -84,7 +98,7 @@ handle_call(begin_transaction, _From, State) ->
 handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
     {reply, {error, not_in_transaction}, State};
 handle_call(commit_transaction, _From, State) ->
-    NewState = State#state{in_transaction = false},
+    NewState = State#state{in_transaction = false, snapshot = nil},
     {reply, ok, NewState};
 
 handle_call(_Request, _From, State) ->
