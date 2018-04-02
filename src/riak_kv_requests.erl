@@ -46,7 +46,7 @@
          get_replica_type/1,
          set_object/2,
          get_request_id/1,
-         get_request_client_clock/1,
+         get_client_clock/1,
          get_start_time/1,
          get_options/1,
          remove_option/2,
@@ -347,8 +347,8 @@ get_request_id(#riak_kv_put_req_v1{req_id = ReqId}) ->
 get_request_id(#riak_kv_get_req_v1{req_id = ReqId}) ->
     ReqId.
 
--spec get_request_client_clock(put_request()) -> non_neg_integer().
-get_request_client_clock(#riak_kv_put_req_v1{client_clock = ClientClock}) ->
+-spec get_client_clock(put_request()) -> non_neg_integer().
+get_client_clock(#riak_kv_put_req_v1{client_clock = ClientClock}) ->
     ClientClock.
 
 get_start_time(#riak_kv_put_req_v1{start_time = StartTime}) ->

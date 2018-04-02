@@ -276,9 +276,8 @@ merge(OldObject, NewObject) ->
         true ->
             merge_write_once(OldObject, NewObj1);
         _ ->
-            DVV = dvv_enabled(Bucket),
             {Time,  {CRDT, Contents}} = timer:tc(fun merge_contents/3,
-                                                 [NewObject, OldObject, DVV]),
+                                                 [NewObject, OldObject, false]),
             ok = riak_kv_stat:update({riak_object_merge, CRDT, Time}),
             OldObject#r_object{contents=Contents,
                 vclock=vclock:merge([OldObject#r_object.vclock,
@@ -893,24 +892,14 @@ update(false, OldObject, NewObject, Actor, Timestamp) ->
     %% get the vclock from the new object
     PutVC = vclock(NewObject),
 
-    %% Optimisation: if the new object's vclock descends from the old
-    %% object's vclock, then don't merge values, just increment the
-    %% clock and overwrite.
-    case vclock:descends(PutVC, LocalVC) of
-        true ->
-            increment_vclock(NewObject, Actor, Timestamp);
-        false ->
-            %% The new object is concurrent with some other value, so
-            %% merge the new object and the old object.
-            MergedClock = vclock:merge([PutVC, LocalVC]),
-            FrontierClock = vclock:increment(Actor, Timestamp, MergedClock),
-            {ok, Dot} = vclock:get_dot(Actor, FrontierClock),
-            %% Assign an event to the new value
-            Bucket = bucket(OldObject),
-            DottedPutObject = assign_dot(NewObject, Dot, dvv_enabled(Bucket)),
-            MergedObject = merge(DottedPutObject, OldObject),
-            set_vclock(MergedObject, FrontierClock)
-    end.
+    MergedClock = vclock:merge([PutVC, LocalVC]),
+    FrontierClock = vclock:increment(Actor, Timestamp, MergedClock),
+    {ok, Dot} = vclock:get_dot(Actor, FrontierClock),
+    %% Assign an event to the new value
+    Bucket = bucket(OldObject),
+    DottedPutObject = assign_dot(NewObject, Dot, dvv_enabled(Bucket)),
+    MergedObject = merge(DottedPutObject, OldObject),
+    set_vclock(MergedObject, FrontierClock).
 
 -spec syntactic_merge(riak_object(), riak_object()) -> riak_object().
 syntactic_merge(CurrentObject, NewObject) ->

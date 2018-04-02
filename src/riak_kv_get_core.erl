@@ -289,18 +289,17 @@ info(#getcore{num_ok = NumOks, num_fail = NumFail, results = Results}) ->
 %% ====================================================================
 %% Internal functions
 %% ====================================================================
-merge(Replies, AllowMult) ->
+merge(Replies, _AllowMult) ->
     RObjs = [RObj || {_I, {ok, RObj}} <- Replies],
     case RObjs of
         [] ->
             {notfound, undefined};
-        _ ->
-            Merged = riak_object:reconcile(RObjs, AllowMult), % include tombstones
-            case riak_kv_util:is_x_deleted(Merged) of
+        [Object] ->
+            case riak_kv_util:is_x_deleted(Object) of
                 true ->
-                    {tombstone, Merged};
+                    {tombstone, Object};
                 _ ->
-                    {ok, Merged}
+                    {ok, Object}
             end
     end.
 

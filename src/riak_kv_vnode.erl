@@ -1352,7 +1352,7 @@ handle_put_request(Req, Sender,
     StartTS = os:timestamp(),
 
     % Calculate causal timestamp
-    ClientClock = riak_kv_requests:get_request_client_clock(Req),
+    ClientClock = riak_kv_requests:get_client_clock(Req),
     PhysicalTimestamp = riak_kv_util:get_timestamp(),
     ReqTimestamp = max(ClientClock + 1, max(MaximumTimestampUsed + 1, PhysicalTimestamp)),
 
@@ -1530,18 +1530,15 @@ prepare_put_existing_object(#state{idx =Idx} = State,
                              lww=LWW,
                              starttime = StartTime,
                              bprops = BProps,
-                             prunetime=PruneTime,
-                             crdt_op = CRDTOp}=PutArgs,
+                             prunetime=PruneTime}=PutArgs,
                             OldObj, IndexBackend, CacheData, RequiresGet) ->
     {IsNewEpoch, ActorId, State2} = maybe_new_key_epoch(Coord, State, OldObj, RObj),
     case put_merge(Coord, LWW, OldObj, RObj, {IsNewEpoch, ActorId}, StartTime) of
         {oldobj, OldObj} ->
             {{false, {OldObj, no_old_object}}, PutArgs, State2};
         {newobj, NewObj} ->
-            AMObj = enforce_allow_mult(NewObj, BProps),
-            IndexSpecs = get_index_specs(IndexBackend, CacheData, RequiresGet, AMObj, OldObj),
-            ObjToStore0 = maybe_prune_vclock(PruneTime, AMObj, BProps),
-            ObjectToStore = maybe_do_crdt_update(Coord, CRDTOp, ActorId, ObjToStore0),
+            IndexSpecs = get_index_specs(IndexBackend, CacheData, RequiresGet, NewObj, OldObj),
+            ObjectToStore = maybe_prune_vclock(PruneTime, NewObj, BProps),
             determine_put_result(ObjectToStore, OldObj, Idx, PutArgs, State2, IndexSpecs, IndexBackend)
     end.
 
