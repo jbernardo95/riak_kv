@@ -2,24 +2,23 @@
 
 -behaviour(gen_server).
 
--export([start_link/1,
-         get/2,
-         put/3,
-         begin_transaction/1,
+-export([begin_transaction/1,
          commit_transaction/1,
-         print_state/1]).
+         get/2,
+         print_state/1,
+         put/3,
+         start_link/1]).
 
--export([init/1,
+-export([code_change/3,
          handle_call/3,
          handle_cast/2,
-         handle_info/2,
-         terminate/2,
-         code_change/3]).
+	     handle_info/2,
+	     init/1,
+	     terminate/2]).
 
 -define(DefaultBucket, <<"default_bucket">>).
 
 -record(state, {client, clock, in_transaction, snapshot}).
-
 
 %%%===================================================================
 %%% API
@@ -43,7 +42,6 @@ commit_transaction(Client) ->
 print_state(Client) ->
     gen_server:cast(Client, print_state).
 
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -54,57 +52,72 @@ init(Node) ->
             State = #state{client = Client,
                            clock = 0,
                            in_transaction = false,
-                           snapshot = nil},
+                           snapshot = undefined},
             {ok, State};
 
         _ ->
             {stop, error}
     end.
 
-
 % Transactional get
 handle_call(
   {get, Key},
   _From,
-  #state{client = Client, clock = Clock, in_transaction = true, snapshot = nil} = State
- ) ->
-    {ok, Object} = Client:get(?DefaultBucket, Key),
-    Timestamp = riak_object:get_timestamp(Object),
+  #state{client = Client,
+         in_transaction = true,
+         snapshot = Snapshot} = State
+) ->
+    GetResult = do_get(Client, Key, Snapshot),
+    NewState = maybe_set_snapshot(GetResult, State),
+    Conflict = check_get_conflict(GetResult, Snapshot),
+    if
+        Conflict ->
+            {reply, {error, transaction_aborted}, abort_transaction(NewState)};
 
-    NewState = State#state{snapshot = max(Clock, Timestamp)},
-    {reply, {ok, Object}, NewState};
+        true ->
+            {reply, GetResult, NewState}
+    end;
 
 % Normal get
-handle_call({get, Key}, _From, #state{client = Client, clock = Clock} = State) ->
-    {ok, Object} = Client:get(?DefaultBucket, Key),
-    Timestamp = riak_object:get_timestamp(Object),
+handle_call(
+  {get, Key},
+  _From,
+  #state{client = Client, clock = Clock} = State
+ ) ->
+    Reply = do_get(Client, Key),
+    NewState = case Reply of
+                   {ok, Object, _Snapshot} ->
+                       Timestamp = riak_object:get_timestamp(Object),
+                       State#state{clock = max(Clock, Timestamp)};
+                   _ ->
+                       State
+               end,
+    {reply, Reply, NewState};
 
-    NewState = State#state{clock = max(Clock, Timestamp)},
-    {reply, {ok, Object}, NewState};
-
-handle_call({put, Key, Value}, _From, #state{client = Client, clock = Clock} = State) ->
+handle_call({put, Key, Value}, _From,
+	    #state{client = Client, clock = Clock} = State) ->
     Object = riak_object:new(?DefaultBucket, Key, Value),
     {ok, Timestamp} = Client:put(Object, Clock),
-
     NewState = State#state{clock = Timestamp},
     {reply, ok, NewState};
 
 handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     NewState = State#state{in_transaction = true},
     {reply, ok, NewState};
+
 handle_call(begin_transaction, _From, State) ->
     {reply, {error, in_transaction}, State};
 
 handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
     {reply, {error, not_in_transaction}, State};
+
 handle_call(commit_transaction, _From, State) ->
-    NewState = State#state{in_transaction = false, snapshot = nil},
+    NewState = State#state{in_transaction = false, snapshot = undefined},
     {reply, ok, NewState};
 
 handle_call(_Request, _From, State) ->
     lager:error("Unexpected message received at hanlde_call~n"),
     {reply, ok, State}.
-
 
 handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
@@ -114,14 +127,61 @@ handle_cast(_Request, State) ->
     lager:error("Unexpected message received at hanlde_cast~n"),
     {noreply, State}.
 
+handle_info(_Info, State) -> {noreply, State}.
 
-handle_info(_Info, State) ->
-    {noreply, State}.
+terminate(_Reason, _State) -> ok.
 
+code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+%%%===================================================================
+%%% Private functions
+%%%===================================================================
 
+do_get(Client, Key) -> do_get(Client, Key, undefined).
 
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
+do_get(Client, Key, undefined) ->
+    Client:get(?DefaultBucket, Key);
+
+do_get(Client, Key, TransactionSnapshot) ->
+    case Client:get(?DefaultBucket, Key) of
+        {ok, Object, NodeSnapshot} ->
+            if
+                TransactionSnapshot > NodeSnapshot ->
+                    % TODO eventually wait for node to be up to date
+                    {error, node_snapshot_behind_transaction_snapshot};
+
+                true ->
+                    {ok, prune_outdated_values(Object), NodeSnapshot}
+            end;
+
+        {error, _} = Error ->
+            Error
+    end.
+
+prune_outdated_values(Object) ->
+    [Value | _] = lists:sort(fun({Metadata1, _}, {Metadata2, _}) ->
+                                     get_version(Metadata1) < get_version(Metadata2)
+                             end, riak_object:get_contents(Object)),
+    riak_object:set_contents(Object, [Value]).
+
+get_version(Metadata) ->
+    case dict:find(version, Metadata) of
+        {ok, Value} -> Value;
+        error -> 0
+    end.
+
+maybe_set_snapshot({ok, Object, _Snapshot}, #state{snapshot = undefined} = State) ->
+    Metadata = riak_object:get_metadata(Object),
+    State#state{snapshot = get_version(Metadata)};
+
+maybe_set_snapshot(_GetResult, State) -> State.
+
+check_get_conflict({ok, Object, Snapshot}, Snapshot) ->
+    Metadata = riak_object:get_metadata(Object),
+    get_version(Metadata) > Snapshot;
+
+check_get_conflict(_Object, _Snapshot) -> false.
+
+abort_transaction(State) ->
+    % TODO eventually send message to vnodes do clean up temporary values
+    State#state{in_transaction = false, snapshot = undefined}.

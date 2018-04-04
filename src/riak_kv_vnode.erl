@@ -115,8 +115,7 @@
           lease = 0 :: non_neg_integer(),
           lease_size = 0 :: non_neg_integer(),
           %% Has a lease been requested but not granted yet
-          leasing = false :: boolean()
-         }).
+          leasing = false :: boolean()}).
 
 -type update_hook() :: module().
 
@@ -143,8 +142,8 @@
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
-                heartbeat_interval :: non_neg_integer()
-               }).
+                heartbeat_interval :: non_neg_integer(),
+                snapshot :: non_neg_integer()}). % The latest log position the vnode is aware of
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -513,7 +512,8 @@ init([Index]) ->
                            md_cache=MDCache,
                            md_cache_size=MDCacheSize,
                            update_hook=update_hook(),
-                           heartbeat_interval = HeartbeatInterval},
+                           heartbeat_interval = HeartbeatInterval,
+                           snapshot = 0},
             try_set_vnode_lock_limit(Index),
             send_heartbeat_after(HeartbeatInterval),
             case AsyncFolding of
@@ -1779,7 +1779,7 @@ put_merge(true, LWW, CurObj, UpdObj, {_NewEpoch, VId}, StartTime) ->
 
 %% @private
 do_get(_Sender, BKey, ReqID,
-       State=#state{idx=Idx, mod=Mod, modstate=ModState}) ->
+       State=#state{idx = Idx, mod = Mod, modstate = ModState, snapshot = Snapshot}) ->
     StartTS = os:timestamp(),
     {Retval, ModState1} = do_get_term(BKey, Mod, ModState),
     State1 = State#state{modstate=ModState1},
@@ -1798,7 +1798,7 @@ do_get(_Sender, BKey, ReqID,
                 {Retval, State1}
         end,
     update_vnode_stats(vnode_get, Idx, StartTS),
-    {reply, {r, Retval1, Idx, ReqID}, State3}.
+    {reply, {r, Retval1, Idx, ReqID, Snapshot}, State3}.
 
 %% @private
 -spec do_get_term({binary(), binary()}, atom(), tuple()) ->

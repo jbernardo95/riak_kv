@@ -20,7 +20,7 @@
 %%
 %% -------------------------------------------------------------------
 -module(riak_kv_get_core).
--export([init/8, add_result/3, result_shortcode/1, enough/1, response/1,
+-export([init/8, add_result/4, result_shortcode/1, enough/1, response/1,
          has_all_results/1, final_action/1, info/1]).
 -export_type([getcore/0, result/0, reply/0, final_action/0]).
 
@@ -56,7 +56,8 @@
                   num_notfound = 0 :: non_neg_integer(),
                   num_deleted = 0 :: non_neg_integer(),
                   num_fail = 0 :: non_neg_integer(),
-                  idx_type :: idx_type()}).
+                  idx_type :: idx_type(),
+                  snapshot :: non_neg_integer()}).
 -opaque getcore() :: #getcore{}.
 
 %% ====================================================================
@@ -76,25 +77,28 @@ init(N, R, PR, FailThreshold, NotFoundOk, AllowMult, DeletedVClock, IdxType) ->
              notfound_ok = NotFoundOk,
              allow_mult = AllowMult,
              deletedvclock = DeletedVClock,
-             idx_type = IdxType}.
+             idx_type = IdxType,
+             snapshot = 0}.
 
 %% Add a result for a vnode index
--spec add_result(non_neg_integer(), result(), getcore()) -> getcore().
-add_result(Idx, {ok, RObj} = Result, GetCore) ->
+-spec add_result(non_neg_integer(), result(), non_neg_integer(), getcore()) -> getcore().
+add_result(Idx, {ok, RObj} = Result, Snapshot, GetCore) ->
     Dels = case riak_kv_util:is_x_deleted(RObj) of
         true ->  1;
         false -> 0
     end,
     num_pr(GetCore#getcore{
             results = [{Idx, Result}|GetCore#getcore.results],
+            snapshot = Snapshot,
             merged = undefined,
             num_ok = GetCore#getcore.num_ok + 1,
             num_deleted = GetCore#getcore.num_deleted + Dels}, Idx);
-add_result(Idx, {error, notfound} = Result, GetCore) ->
+add_result(Idx, {error, notfound} = Result, Snapshot, GetCore) ->
     case GetCore#getcore.notfound_ok of
         true ->
             num_pr(GetCore#getcore{
                     results = [{Idx, Result}|GetCore#getcore.results],
+                    snapshot = Snapshot,
                     merged = undefined,
                     num_ok = GetCore#getcore.num_ok + 1}, Idx);
         _ ->
@@ -103,9 +107,10 @@ add_result(Idx, {error, notfound} = Result, GetCore) ->
                 merged = undefined,
                 num_notfound = GetCore#getcore.num_notfound + 1}
     end;
-add_result(Idx, {error, _Reason} = Result, GetCore) ->
+add_result(Idx, {error, _Reason} = Result, Snapshot, GetCore) ->
     GetCore#getcore{
         results = [{Idx, Result}|GetCore#getcore.results],
+        snapshot = Snapshot,
         merged = undefined,
         num_fail = GetCore#getcore.num_fail + 1}.
 
@@ -135,12 +140,14 @@ enough(_) ->
 %% Met quorum
 response(#getcore{r = R, num_ok = NumOK, pr= PR, num_pok = NumPOK} = GetCore)
         when NumOK >= R andalso NumPOK >= PR ->
-    #getcore{results = Results, allow_mult=AllowMult,
-        deletedvclock = DeletedVClock} = GetCore,
+    #getcore{results = Results,
+             allow_mult=AllowMult,
+             deletedvclock = DeletedVClock,
+             snapshot = Snapshot} = GetCore,
     {ObjState, MObj} = Merged = merge(Results, AllowMult),
     Reply = case ObjState of
         ok ->
-            Merged; % {ok, MObj}
+            {ok, MObj, Snapshot};
         tombstone when DeletedVClock ->
             {error, {deleted, riak_object:vclock(MObj)}};
         _ -> % tombstone or notfound or expired
