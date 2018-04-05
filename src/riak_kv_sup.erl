@@ -28,7 +28,10 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, start_log/0]).
+-export([start_link/0,
+         start_log/0,
+         start_transactions_committer/0]).
+
 -export([init/1]).
 
 -define (IF (Bool, A, B), if Bool -> A; true -> B end).
@@ -43,6 +46,12 @@ start_log() ->
             {riak_kv_log, start_link, []},
             permanent, 5000, worker, [riak_kv_log]},
     supervisor:start_child(?MODULE, Log).
+
+start_transactions_committer() ->
+    TransactionsCommitter = {riak_kv_transactions_committer,
+                              {riak_kv_transactions_committer, start_link, []},
+                              permanent, 5000, worker, [riak_kv_transactions_committer]},
+    supervisor:start_child(?MODULE, TransactionsCommitter).
 
 %% @spec init([]) -> SupervisorTree
 %% @doc supervisor callback.
