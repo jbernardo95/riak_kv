@@ -29,11 +29,11 @@ start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
 
-append_record(Record, Partition)->
+append_record(Record, Partition) ->
     gen_server:call({global, ?MODULE}, {append_record, Record, Partition}).
 
 
-heartbeat(Partition, Clock)->
+heartbeat(Partition, Clock) ->
     gen_server:cast({global, ?MODULE}, {heartbeat, Partition, Clock}).
 
 
@@ -76,7 +76,7 @@ init(_Args) ->
         {format, internal},
         {mode, read_write}
     ],
-    lager:info("Disk log options ~p ~n", [DiskLogOptions]),
+    lager:info("Disk log options ~p~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
 
     erlang:send(self(), append_stable_records_to_the_log),
@@ -92,7 +92,7 @@ handle_call(
   _From,
   #state{heartbeats = Heartbeats} = State
  )->
-    %lager:info("Received record ~p to append from partition ~p ~n", [Record, Partition]),
+    %lager:info("Received record ~p to append from partition ~p~n", [Record, Partition]),
 
     % Insert record in ets table
     ets:insert(?PENDING_RECORDS_TABLE, {{Timestamp, Partition}, Record}),
@@ -119,8 +119,8 @@ handle_cast(
     {noreply, State1};
 
 
-handle_cast(_Request, State) ->
-    lager:error("Unexpected message received at hanlde_cast~n"),
+handle_cast(Request, State) ->
+    lager:error("Unexpected request received at handle_cast: ~p~n", [Request]),
     {noreply, State}.
 
 
@@ -129,7 +129,8 @@ handle_info(append_stable_records_to_the_log, State) ->
     erlang:send_after(1000, self(), append_stable_records_to_the_log),
     {noreply, State};
 
-handle_info(_Info, State) ->
+handle_info(Info, State) ->
+    lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
     {noreply, State}.
 
 

@@ -115,26 +115,28 @@ handle_call(commit_transaction, _From, State) ->
     NewState = State#state{in_transaction = false, snapshot = undefined},
     {reply, ok, NewState};
 
-handle_call(_Request, _From, State) ->
-    lager:error("Unexpected message received at hanlde_call~n"),
-    {reply, ok, State}.
+handle_call(Request, _From, State) ->
+    lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
+    {reply, error, State}.
 
 handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
     {noreply, State};
 
-handle_cast(_Request, State) ->
-    lager:error("Unexpected message received at hanlde_cast~n"),
+handle_cast(Request, State) ->
+    lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
     {noreply, State}.
 
-handle_info(_Info, State) -> {noreply, State}.
+handle_info(Info, State) ->
+    lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
+    {noreply, State}.
 
 terminate(_Reason, _State) -> ok.
 
 code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 %%%===================================================================
-%%% Private functions
+%%% Internal functions
 %%%===================================================================
 
 do_get(Client, Key) -> do_get(Client, Key, undefined).
