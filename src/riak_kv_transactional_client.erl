@@ -18,7 +18,7 @@
 
 -define(DefaultBucket, <<"default_bucket">>).
 
--record(state, {client, clock, in_transaction, snapshot}).
+-record(state, {client, clock, in_transaction, snapshot, puts}).
 
 %%%===================================================================
 %%% API
@@ -52,7 +52,8 @@ init(Node) ->
             State = #state{client = Client,
                            clock = 0,
                            in_transaction = false,
-                           snapshot = undefined},
+                           snapshot = undefined,
+                           puts = []},
             {ok, State};
 
         _ ->
@@ -94,8 +95,21 @@ handle_call(
                end,
     {reply, Reply, NewState};
 
-handle_call({put, Key, Value}, _From,
-	    #state{client = Client, clock = Clock} = State) ->
+% Transactional put 
+handle_call(
+  {put, Key, Value},
+  _From,
+  #state{in_transaction = true, puts = Puts} = State) ->
+    Object = riak_object:new(?DefaultBucket, Key, Value),
+    NewPuts = [Object | Puts],
+    NewState = State#state{puts = NewPuts},
+    {reply, ok, NewState};
+
+% Normal put
+handle_call(
+  {put, Key, Value},
+  _From,
+  #state{client = Client, clock = Clock} = State) ->
     Object = riak_object:new(?DefaultBucket, Key, Value),
     {ok, Timestamp} = Client:put(Object, Clock),
     NewState = State#state{clock = Timestamp},
@@ -112,7 +126,9 @@ handle_call(commit_transaction, _From, #state{in_transaction = false} = State) -
     {reply, {error, not_in_transaction}, State};
 
 handle_call(commit_transaction, _From, State) ->
-    NewState = State#state{in_transaction = false, snapshot = undefined},
+    % TODO
+    % Create commit record and send to all the vnodes involved
+    NewState = State#state{in_transaction = false, snapshot = undefined, puts = []},
     {reply, ok, NewState};
 
 handle_call(Request, _From, State) ->
@@ -186,4 +202,4 @@ check_get_conflict(_Object, _Snapshot) -> false.
 
 abort_transaction(State) ->
     % TODO eventually send message to vnodes do clean up temporary values
-    State#state{in_transaction = false, snapshot = undefined}.
+    State#state{in_transaction = false, snapshot = undefined, puts = []}.
