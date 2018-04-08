@@ -18,7 +18,7 @@
 
 -define(DefaultBucket, <<"default_bucket">>).
 
--record(state, {client, clock, in_transaction, snapshot, puts}).
+-record(state, {client, clock, in_transaction, snapshot, gets, puts}).
 
 %%%===================================================================
 %%% API
@@ -53,6 +53,7 @@ init(Node) ->
                            clock = 0,
                            in_transaction = false,
                            snapshot = undefined,
+                           gets = [],
                            puts = []},
             {ok, State};
 
@@ -70,13 +71,14 @@ handle_call(
 ) ->
     GetResult = do_get(Client, Key, Snapshot),
     NewState = maybe_set_snapshot(GetResult, State),
+    NewState1 = maybe_record_get(GetResult, NewState),
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            {reply, {error, transaction_aborted}, abort_transaction(NewState)};
+            {reply, {error, transaction_aborted}, abort_transaction(NewState1)};
 
         true ->
-            {reply, GetResult, NewState}
+            {reply, GetResult, NewState1}
     end;
 
 % Normal get
@@ -126,9 +128,8 @@ handle_call(commit_transaction, _From, #state{in_transaction = false} = State) -
     {reply, {error, not_in_transaction}, State};
 
 handle_call(commit_transaction, _From, State) ->
-    % TODO
-    % Create commit record and send to all the vnodes involved
-    NewState = State#state{in_transaction = false, snapshot = undefined, puts = []},
+    % TODO actually commit the transaction
+    NewState = clean_transaction_state(State)
     {reply, ok, NewState};
 
 handle_call(Request, _From, State) ->
@@ -154,6 +155,12 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+clean_transaction_state(State) ->
+    State#state{in_transaction = false,
+                snapshot = undefined,
+                gets = [],
+                puts = []}.
 
 do_get(Client, Key) -> do_get(Client, Key, undefined).
 
@@ -194,6 +201,12 @@ maybe_set_snapshot({ok, Object, _Snapshot}, #state{snapshot = undefined} = State
 
 maybe_set_snapshot(_GetResult, State) -> State.
 
+maybe_record_get({ok, Object, _Snapshot}, #state{gets = Gets} = State) ->
+    NewGets = [Object | Gets],
+    State#state{gets = NewGets};
+
+maybe_set_snapshot(_GetResult, State) -> State.
+
 check_get_conflict({ok, Object, Snapshot}, Snapshot) ->
     Metadata = riak_object:get_metadata(Object),
     get_version(Metadata) > Snapshot;
@@ -202,4 +215,4 @@ check_get_conflict(_Object, _Snapshot) -> false.
 
 abort_transaction(State) ->
     % TODO eventually send message to vnodes do clean up temporary values
-    State#state{in_transaction = false, snapshot = undefined, puts = []}.
+    clean_transaction_state(State).
