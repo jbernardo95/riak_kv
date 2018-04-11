@@ -26,6 +26,8 @@
 -export([test_vnode/1, put/7]).
 -export([start_vnode/1,
          start_vnodes/1,
+         commit_transaction/5,
+         commit_transaction/6,
          get/3,
          get/4,
          del/3,
@@ -245,6 +247,13 @@ start_vnodes(IdxList) ->
 
 test_vnode(I) ->
     riak_core_vnode:start_link(riak_kv_vnode, I, infinity).
+
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts) ->
+    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, {fsm, undefined, self()}).
+
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts, Sender) ->
+    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts),
+    riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
 get(Preflist, BKey, ReqId) ->
     %% Assuming this function is called from a FSM process
@@ -541,6 +550,8 @@ init([Index]) ->
 handle_overload_command(Req, Sender, Idx) ->
     handle_overload_request(riak_kv_requests:request_type(Req), Req, Sender, Idx).
 
+handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
+    riak_core_vnode:reply(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
 handle_overload_request(kv_get_request, Req, Sender, Idx) ->
@@ -780,7 +791,7 @@ handle_command(send_heartbeat, _Sender,
     % Send heartbeat to riak_kv_log
     PhysicalTimestamp = riak_kv_util:get_timestamp(),
     MaximumTimestampUsed1 = max(PhysicalTimestamp, MaximumTimestampUsed),
-    %lager:info("Sending heartbeat to riak_kv_log from partition ~p with clock ~p ~n", [Idx, MaximumTimestampUsed1]),
+    %lager:info("Sending heartbeat to riak_kv_log from partition ~p with clock ~p~n", [Idx, MaximumTimestampUsed1]),
     riak_kv_log:heartbeat(Idx, MaximumTimestampUsed1),
 
     % Schedule next heartbeat sending
@@ -795,6 +806,9 @@ handle_command(Req, Sender, State) ->
 
 %% @todo: pre record encapsulation there was no catch all clause in handle_command,
 %%        so crashing on unknown should work.
+handle_request(kv_commit_transaction_request, Req, Sender, State) ->
+    NewState = handle_commit_transaction_request(Req, Sender, State),
+    {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, State) ->
     {_Reply, NewState} = handle_put_request(Req, Sender, State),
     {noreply, NewState};
@@ -1347,8 +1361,50 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_put_request(Req, Sender,
-                   #state{idx = Idx, maximum_timestamp_used = MaximumTimestampUsed} = State) ->
+handle_commit_transaction_request(
+  Req,
+  Sender,
+  #state{idx = Idx,
+         maximum_timestamp_used  = MaximumTimestampUsed} = State
+) ->
+    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    % Save puts as temporary
+    Puts1 = riak_kv_requests:get_puts(Req),
+    FoldFun = fun({Object, Index}, {Puts2, PreflistMap1, State1}) ->
+                      if
+                          Index == Idx ->
+                              Bkey = riak_object:bkey(Object),
+                              {_, State2} = do_put(Bkey, Object, 0, 0, [], State1)
+                      end,
+                      {[riak_object:key(Object) | Puts2], dict:store(Index, ok, PreflistMap1), State2}
+              end,
+    {Puts, PreflistMap, NewState} = lists:foldl(FoldFun, {[], dict:new(), State}, Puts1),
+
+    % Append commit record to log
+    PhysicalTimestamp = riak_kv_util:get_timestamp(),
+    Timestamp = max(MaximumTimestampUsed + 1, PhysicalTimestamp),
+    Id = riak_kv_requests:get_id(Req),
+    Snapshot = riak_kv_requests:get_snapshot(Req),
+    Gets = riak_kv_requests:get_gets(Req),
+    NVnodes = dict:size(PreflistMap),
+    Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes}),
+    riak_kv_log:append_record(Record, Idx),
+
+    Reply = {ok, Idx, Id},
+    riak_core_vnode:reply(Sender, Reply),
+
+    NewState#state{maximum_timestamp_used = Timestamp}.
+
+%% @private
+handle_put_request(
+  Req,
+  Sender,
+  #state{idx = Idx,
+         maximum_timestamp_used = MaximumTimestampUsed} = State
+) ->
+    lager:info("Handling put request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
     StartTS = os:timestamp(),
 
     % Calculate causal timestamp
@@ -1358,36 +1414,39 @@ handle_put_request(Req, Sender,
 
     % Append record to log
     ReqId = riak_kv_requests:get_request_id(Req),
-    Record = riak_kv_log:new_log_record(ReqId, ReqTimestamp),
+    Record = riak_kv_log:new_log_record(ReqTimestamp, put, ReqId),
     riak_kv_log:append_record(Record, Idx),
 
     % Respond to client
     riak_core_vnode:reply(Sender, {w, Idx, ReqId, ReqTimestamp}),
 
     % Attach timestamp to object
-    Object = riak_kv_requests:get_object(Req),
-    Object1 = riak_object:set_timestamp(Object, ReqTimestamp),
+    %Object = riak_kv_requests:get_object(Req),
+    %Object1 = riak_object:set_timestamp(Object, ReqTimestamp),
 
     % Store object 
     NewState1 = State#state{maximum_timestamp_used = ReqTimestamp},
-    Req1 = riak_kv_requests:set_object(Req, Object1),
-    {Reply, NewState} = do_put(Sender, Req1, NewState1),
+    %Req1 = riak_kv_requests:set_object(Req, Object1),
+    {Reply, NewState} = do_put(Req, NewState1),
+
+    riak_core_vnode:reply(Sender, Reply),
 
     update_vnode_stats(vnode_put, Idx, StartTS),
+
     {Reply, NewState}.
 
 %% @private
-do_put(Sender, Request, State) ->
+do_put(Request, State) ->
     BKey = riak_kv_requests:get_bucket_key(Request),
     Object = riak_kv_requests:get_object(Request),
     RequestId = riak_kv_requests:get_request_id(Request),
     StartTime = riak_kv_requests:get_start_time(Request),
     Options = riak_kv_requests:get_options(Request),
-    do_put(Sender, BKey, Object, RequestId, StartTime, Options, State).
+    do_put(BKey, Object, RequestId, StartTime, Options, State).
 
 %% @private
 %% upon receipt of a client-initiated put
-do_put(Sender, {Bucket,_Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
+do_put({Bucket,_Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
     BProps =  case proplists:get_value(bucket_props, Options) of
                   undefined ->
                       riak_core_bucket:get_bucket(Bucket);
@@ -1418,9 +1477,9 @@ do_put(Sender, {Bucket,_Key}=BKey, RObj, ReqID, StartTime, Options, State) ->
                        hash_ops = HashOps},
     {PrepPutRes, UpdPutArgs, State2} = prepare_put(State, PutArgs),
     {Reply, UpdState} = perform_put(PrepPutRes, State2, UpdPutArgs),
-    riak_core_vnode:reply(Sender, Reply),
 
     update_index_write_stats(UpdPutArgs#putargs.is_index, UpdPutArgs#putargs.index_specs),
+
     {Reply, UpdState}.
 
 -spec do_backend_delete(
@@ -1779,7 +1838,10 @@ put_merge(true, LWW, CurObj, UpdObj, {_NewEpoch, VId}, StartTime) ->
 
 %% @private
 do_get(_Sender, BKey, ReqID,
-       State=#state{idx = Idx, mod = Mod, modstate = ModState, snapshot = Snapshot}) ->
+       #state{idx = Idx,
+              mod = Mod,
+              modstate = ModState,
+              snapshot = Snapshot} = State) ->
     StartTS = os:timestamp(),
     {Retval, ModState1} = do_get_term(BKey, Mod, ModState),
     State1 = State#state{modstate=ModState1},

@@ -6,7 +6,7 @@
          append_record/2,
          heartbeat/2,
          get_n_records_logged/0,
-         new_log_record/2]).
+         new_log_record/3]).
 
 -export([init/1,
          handle_call/3,
@@ -42,8 +42,10 @@ get_n_records_logged() ->
     gen_server:call({global, ?MODULE}, get_n_records_logged).
 
 
-new_log_record(ReqId, Timestamp) ->
-    #log_record{req_id = ReqId, timestamp = Timestamp}.
+new_log_record(Timestamp, Type, Payload) ->
+    #log_record{timestamp = Timestamp,
+                type = Type,
+                payload = Payload}.
 
 
 %%%===================================================================

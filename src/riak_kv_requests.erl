@@ -22,7 +22,8 @@
 -module(riak_kv_requests).
 
 %% API
--export([new_put_request/6,
+-export([new_commit_transaction_request/4,
+         new_put_request/6,
          new_get_request/2,
          new_w1c_put_request/3,
          new_listkeys_request/3,
@@ -42,17 +43,22 @@
          get_ack_backpressure/1,
          get_query/1,
          get_object/1,
+         set_object/2,
          get_encoded_obj/1,
          get_replica_type/1,
-         set_object/2,
          get_request_id/1,
          get_client_clock/1,
          get_start_time/1,
          get_options/1,
+         get_id/1,
+         get_snapshot/1,
+         get_gets/1,
+         get_puts/1,
          remove_option/2,
          request_type/1]).
 
--export_type([put_request/0,
+-export_type([commit_transaction_request/0,
+              put_request/0,
               get_request/0,
               w1c_put_request/0,
               listkeys_request/0,
@@ -79,17 +85,26 @@
 -type coverage_filter() :: riak_kv_coverage_filter:filter().
 -type query() :: riak_index:query_def().
 
--record(riak_kv_put_req_v1,
-        { bkey :: bucket_key(),
-          object :: object(),
-          client_clock :: non_neg_integer(),
-          req_id :: request_id(),
-          start_time :: start_time(),
-          options :: request_options()}).
+-record(riak_kv_commit_transaction_req_v1, {
+    id :: non_neg_integer(),
+    snapshot :: non_neg_integer(),
+    gets :: [object()],
+    puts :: [object()]
+}).
+
+-record(riak_kv_put_req_v1, {
+    bkey :: bucket_key(),
+    object :: object(),
+    client_clock :: non_neg_integer(),
+    req_id :: request_id(),
+    start_time :: start_time(),
+    options :: request_options()
+}).
 
 -record(riak_kv_get_req_v1, {
-          bkey :: bucket_key(),
-          req_id :: request_id()}).
+    bkey :: bucket_key(),
+    req_id :: request_id()
+}).
 
 -record(riak_kv_w1c_put_req_v1, {
     bkey :: bucket_key(),
@@ -99,47 +114,56 @@
 }).
 
 -record(riak_kv_listkeys_req_v3, {
-          bucket :: bucket(),
-          item_filter :: item_filter()}).
+    bucket :: bucket(),
+    item_filter :: item_filter()
+}).
 
 %% same as _v3, but triggers ack-based backpressure (we switch on the record *name*)
 -record(riak_kv_listkeys_req_v4, {
-          bucket :: bucket(),
-          item_filter :: item_filter()}).
+    bucket :: bucket(),
+    item_filter :: item_filter()
+}).
 
 -record(riak_kv_list_group_req_v1, {
     bucket :: bucket(),
-    group_params:: group_params()}).
+    group_params:: group_params()
+}).
 
 -record(riak_kv_listbuckets_req_v1, {
-          item_filter :: item_filter()}).
+    item_filter :: item_filter()
+}).
 
 -record(riak_kv_index_req_v1, {
-          bucket :: bucket(),
-          item_filter :: coverage_filter(),
-          qry :: query()}).
+    bucket :: bucket(),
+    item_filter :: coverage_filter(),
+    qry :: query()
+}).
 
 %% same as _v1, but triggers ack-based backpressure
 -record(riak_kv_index_req_v2, {
-          bucket :: bucket(),
-          item_filter :: coverage_filter(),
-          qry :: riak_index:query_def()}).
+    bucket :: bucket(),
+    item_filter :: coverage_filter(),
+    qry :: riak_index:query_def()
+}).
 
 -record(riak_kv_vnode_status_req_v1, {}).
 
 -record(riak_kv_delete_req_v1, {
-          bkey :: bucket_key(),
-          req_id :: request_id()}).
+    bkey :: bucket_key(),
+    req_id :: request_id()
+}).
 
 -record(riak_kv_map_req_v1, {
-          bkey :: bucket_key(),
-          qterm :: term(),
-          keydata :: term(),
-          from :: term()}).
+    bkey :: bucket_key(),
+    qterm :: term(),
+    keydata :: term(),
+    from :: term()
+}).
 
 -record(riak_kv_vclock_req_v1, {bkeys = [] :: [bucket_key()]}).
 
 
+-opaque commit_transaction_request() :: #riak_kv_commit_transaction_req_v1{}.
 -opaque put_request() :: #riak_kv_put_req_v1{}.
 -opaque get_request() :: #riak_kv_get_req_v1{}.
 -opaque w1c_put_request() :: #riak_kv_w1c_put_req_v1{}.
@@ -153,7 +177,8 @@
 -opaque vclock_request() :: #riak_kv_vclock_req_v1{}.
 
 
--type request() :: put_request()
+-type request() :: commit_transaction_request()
+                 | put_request()
                  | get_request()
                  | w1c_put_request()
                  | listkeys_request()
@@ -165,7 +190,8 @@
                  | map_request()
                  | vclock_request().
 
--type request_type() :: kv_put_request
+-type request_type() :: kv_commit_transaction_request
+                      | kv_put_request
                       | kv_get_request
                       | kv_w1c_put_request
                       | kv_listkeys_request
@@ -179,20 +205,31 @@
                       | unknown.
 
 -spec request_type(request()) -> request_type().
-request_type(#riak_kv_put_req_v1{})          -> kv_put_request;
-request_type(#riak_kv_get_req_v1{})          -> kv_get_request;
-request_type(#riak_kv_w1c_put_req_v1{})      -> kv_w1c_put_request;
-request_type(#riak_kv_listkeys_req_v3{})     -> kv_listkeys_request;
-request_type(#riak_kv_listkeys_req_v4{})     -> kv_listkeys_request;
-request_type(#riak_kv_list_group_req_v1{})   -> kv_list_group_request;
-request_type(#riak_kv_listbuckets_req_v1{})  -> kv_listbuckets_request;
-request_type(#riak_kv_index_req_v1{})        -> kv_index_request;
-request_type(#riak_kv_index_req_v2{})        -> kv_index_request;
-request_type(#riak_kv_vnode_status_req_v1{}) -> kv_vnode_status_request;
-request_type(#riak_kv_delete_req_v1{})       -> kv_delete_request;
-request_type(#riak_kv_map_req_v1{})          -> kv_map_request;
-request_type(#riak_kv_vclock_req_v1{})       -> kv_vclock_request;
-request_type(_)                              -> unknown.
+request_type(#riak_kv_commit_transaction_req_v1{}) -> kv_commit_transaction_request;
+request_type(#riak_kv_put_req_v1{})                -> kv_put_request;
+request_type(#riak_kv_get_req_v1{})                -> kv_get_request;
+request_type(#riak_kv_w1c_put_req_v1{})            -> kv_w1c_put_request;
+request_type(#riak_kv_listkeys_req_v3{})           -> kv_listkeys_request;
+request_type(#riak_kv_listkeys_req_v4{})           -> kv_listkeys_request;
+request_type(#riak_kv_list_group_req_v1{})         -> kv_list_group_request;
+request_type(#riak_kv_listbuckets_req_v1{})        -> kv_listbuckets_request;
+request_type(#riak_kv_index_req_v1{})              -> kv_index_request;
+request_type(#riak_kv_index_req_v2{})              -> kv_index_request;
+request_type(#riak_kv_vnode_status_req_v1{})       -> kv_vnode_status_request;
+request_type(#riak_kv_delete_req_v1{})             -> kv_delete_request;
+request_type(#riak_kv_map_req_v1{})                -> kv_map_request;
+request_type(#riak_kv_vclock_req_v1{})             -> kv_vclock_request;
+request_type(_)                                    -> unknown.
+
+-spec new_commit_transaction_request(non_neg_integer(),
+                                     non_neg_integer(),
+                                     [object()],
+                                     [object()]) -> commit_transaction_request().
+new_commit_transaction_request(Id, Snapshot, Gets, Puts) ->
+    #riak_kv_commit_transaction_req_v1{id = Id,
+                                       snapshot = Snapshot,
+                                       gets = Gets,
+                                       puts = Puts}.
 
 -spec new_put_request(bucket_key(),
                       object(),
@@ -330,12 +367,15 @@ get_query(#riak_kv_index_req_v1{qry = Query}) ->
 get_query(#riak_kv_index_req_v2{qry = Query}) ->
     Query.
 
+get_object(#riak_kv_put_req_v1{object = Object}) ->
+    Object.
+
+set_object(#riak_kv_put_req_v1{}=Req, Object) ->
+    Req#riak_kv_put_req_v1{object = Object}.
+
 -spec get_encoded_obj(request()) -> encoded_obj().
 get_encoded_obj(#riak_kv_w1c_put_req_v1{encoded_obj = EncodedObj}) ->
     EncodedObj.
-
-get_object(#riak_kv_put_req_v1{object = Object}) ->
-    Object.
 
 -spec get_replica_type(request()) -> replica_type().
 get_replica_type(#riak_kv_w1c_put_req_v1{type = Type}) ->
@@ -357,8 +397,17 @@ get_start_time(#riak_kv_put_req_v1{start_time = StartTime}) ->
 get_options(#riak_kv_put_req_v1{options = Options}) ->
     Options.
 
-set_object(#riak_kv_put_req_v1{}=Req, Object) ->
-    Req#riak_kv_put_req_v1{object = Object}.
+get_id(#riak_kv_commit_transaction_req_v1{id = Id}) ->
+    Id.
+
+get_snapshot(#riak_kv_commit_transaction_req_v1{snapshot = Snapshot}) ->
+    Snapshot.
+
+get_gets(#riak_kv_commit_transaction_req_v1{gets = Gets}) ->
+    Gets.
+
+get_puts(#riak_kv_commit_transaction_req_v1{puts = Puts}) ->
+    Puts.
 
 remove_option(#riak_kv_put_req_v1{options = Options}=Req, Option) ->
     NewOptions = proplists:delete(Option, Options),

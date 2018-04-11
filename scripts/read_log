@@ -34,5 +34,5 @@ read_log_content(Log, Continuation, Terms) ->
     end.
 
 usage() ->
-    io:format("Usage: read_log data_path max_n_bytes, max_n_files\n"),
+    io:format("Usage: read_log data_path max_n_bytes max_n_files\n"),
     halt(1).

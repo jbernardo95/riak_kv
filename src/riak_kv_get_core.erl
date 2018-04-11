@@ -78,7 +78,7 @@ init(N, R, PR, FailThreshold, NotFoundOk, AllowMult, DeletedVClock, IdxType) ->
              allow_mult = AllowMult,
              deletedvclock = DeletedVClock,
              idx_type = IdxType,
-             snapshot = 0}.
+             snapshot = -1}.
 
 %% Add a result for a vnode index
 -spec add_result(non_neg_integer(), result(), non_neg_integer(), getcore()) -> getcore().
@@ -149,34 +149,34 @@ response(#getcore{r = R, num_ok = NumOK, pr= PR, num_pok = NumPOK} = GetCore)
         ok ->
             {ok, MObj, Snapshot};
         tombstone when DeletedVClock ->
-            {error, {deleted, riak_object:vclock(MObj)}};
+            {error, {deleted, riak_object:vclock(MObj)}, Snapshot};
         _ -> % tombstone or notfound or expired
-            {error, notfound}
+            {error, notfound, Snapshot}
     end,
     {Reply, GetCore#getcore{merged = Merged}};
 %% everything was either a tombstone or a notfound
 response(#getcore{num_notfound = NumNotFound, num_ok = NumOK,
-        num_deleted = NumDel, num_fail = NumFail} = GetCore)
+        num_deleted = NumDel, num_fail = NumFail, snapshot = Snapshot} = GetCore)
         when NumNotFound + NumDel > 0, NumOK - NumDel == 0, NumFail == 0  ->
-    {{error, notfound}, GetCore};
+    {{error, notfound, Snapshot}, GetCore};
 %% We've satisfied R, but not PR
-response(#getcore{r = R, pr = PR, num_ok = NumR, num_pok = NumPR} = GetCore)
+response(#getcore{r = R, pr = PR, num_ok = NumR, num_pok = NumPR, snapshot = Snapshot} = GetCore)
       when PR > 0, NumPR < PR, NumR >= R ->
-    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}}, GetCore);
+    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}, Snapshot}, GetCore);
 %% PR and/or R are unsatisfied, but PR is more restrictive
-response(#getcore{r = R, num_pok = NumPR, pr = PR} = GetCore) when PR >= R ->
-    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}}, GetCore);
+response(#getcore{r = R, num_pok = NumPR, pr = PR, snapshot = Snapshot} = GetCore) when PR >= R ->
+    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}, Snapshot}, GetCore);
 %% PR and/or R are unsatisfied, but R is more restrictive
-response(#getcore{r = R, num_ok = NumR} = GetCore) ->
-    check_overload({error, {r_val_unsatisfied, R,  NumR}}, GetCore).
+response(#getcore{r = R, num_ok = NumR, snapshot = Snapshot} = GetCore) ->
+    check_overload({error, {r_val_unsatisfied, R,  NumR}, Snapshot}, GetCore).
 
 %% Check for vnode overload
-check_overload(Response, GetCore = #getcore{results=Results}) ->
+check_overload(Response, GetCore = #getcore{results=Results, snapshot = Snapshot}) ->
     case [x || {_,{error, overload}} <- Results] of
         [] ->
             {Response, GetCore};
         _->
-            {{error, overload}, GetCore}
+            {{error, overload, Snapshot}, GetCore}
     end.
 
 %% Check if all expected results have been added

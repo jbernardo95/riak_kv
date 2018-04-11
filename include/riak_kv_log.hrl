@@ -1,4 +1,5 @@
 -record(log_record, {
-    req_id,
-    timestamp
+    timestamp,
+    type,
+    payload
 }). 
