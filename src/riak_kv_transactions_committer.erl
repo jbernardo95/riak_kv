@@ -102,7 +102,7 @@ process_record(
 ) ->
     lager:info("Processing log record ~p~n", [Record]),
 
-    {Id, _Snapshot, _Gets, _Puts, NVnodes} = Payload,
+    {Id, _Snapshot, _Gets, _Puts, NVnodes, _Client} = Payload,
 
     NewRunningTransactions = case dict:find(Id, RunningTransactions) of
                                  {ok, Value} ->
@@ -125,22 +125,26 @@ process_record(
 
 process_record(_Record, Acc) -> Acc.
 
-commit_transaction({_Id, Snapshot, Gets, Puts, _}, Version, LatestObjectVersions) ->
+commit_transaction({Id, Snapshot, Gets, Puts, _, Client}, Version, LatestObjectVersions) ->
     {ConflictGets, NewLatestObjectVersions1} = check_conflicts(Gets, Snapshot, LatestObjectVersions, Version),
     {ConflictPuts, NewLatestObjectVersions2} = check_conflicts(Puts, Snapshot, NewLatestObjectVersions1, Version),
 
     Conflict = ConflictGets or ConflictPuts,
     if
         Conflict -> 
+            send_transaction_commit_status_to(Client, Id, aborted, Version),
+
             % TODO
-            % Send message to commit fsm telling abort
             % Send message to vnodes to delete temporary values
+
             LatestObjectVersions;
 
         true ->
+            send_transaction_commit_status_to(Client, Id, committed, Version),
+
             % TODO
-            % Send message to commit fsm telling commit 
             % Send message to vnodes to commit temporary values
+
             NewLatestObjectVersions2
     end.
 
@@ -161,3 +165,7 @@ check_conflicts([Object | Rest], Snapshot, LatestObjectVersions, Version, Confli
     NewLatestObjectVersions = dict:store(Object, Version, LatestObjectVersions),
 
     check_conflicts(Rest, Snapshot, NewLatestObjectVersions, Version, NewConflict).
+
+send_transaction_commit_status_to(Client, TransactionId, Status, Version) ->
+    Messsage = {transaction_commit_status, TransactionId, Status, Version},
+    riak_core_vnode:reply(Client, Messsage).

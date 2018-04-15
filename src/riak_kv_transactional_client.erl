@@ -118,13 +118,10 @@ handle_call(
     Id = erlang:phash2({self(), os:timestamp()}),
     Object = riak_object:new(?DefaultBucket, Key, Value),
 
-    Result = Client:commit_transaction(Id, Clock, [], [Object]),
+    {Status, Version} = Client:commit_transaction(Id, Clock, [], [Object]),
 
-    % TODO do something with the result
-    % update clock to match the transaction position in the log
-    % or the latest log position in case the transaction aborts
-
-    {reply, Result, State};
+    NewState = Status#state{clock = Version},
+    {reply, Status, NewState};
 
 handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     Id = erlang:phash2({self(), os:timestamp()}),
@@ -145,18 +142,16 @@ handle_call(
          snapshot = Snapshot,
          gets = Gets,
          puts = PutsDict} = State
- ) ->
+) ->
     % TODO handle cases in which the transaction did no do anything -> empty gets and puts
 
     Puts = dict:fold(fun(_, Value, Acc) -> [Value | Acc] end, [], PutsDict),
-    Result = Client:commit_transaction(Id, Snapshot, Gets, Puts),
 
-    % TODO do something with the result
-    % update clock to match the transaction position in the log
-    % or the latest log position in case the transaction aborts
+    {Status, Version} = Client:commit_transaction(Id, Snapshot, Gets, Puts),
 
-    NewState = clean_transaction_state(State),
-    {reply, Result, NewState};
+    NewState1 = clean_transaction_state(State),
+    NewState = NewState1#state{clock = Version},
+    {reply, Status, NewState};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
@@ -209,7 +204,7 @@ do_get_remote(Client, Key, Snapshot) ->
         {ok, _Object, VnodeSnapshot} = Reply ->
             if
                 Snapshot > VnodeSnapshot ->
-                    % TODO eventually wait for node to be up to date
+                    % TODO wait for node to be up to date
                     {error, node_snapshot_behind_local_snapshot};
 
                 true -> Reply
@@ -279,5 +274,5 @@ check_get_conflict({ok, Object, _VnodeSnapshot}, Snapshot) ->
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
 abort_transaction(State) ->
-    % TODO eventually send message to vnodes do clean up temporary values
+    % TODO eventually send message to vnodes to inform that the transaction aborted 
     clean_transaction_state(State).

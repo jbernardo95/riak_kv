@@ -15,7 +15,16 @@
          wait_for_transactions_committer/2,
          respond_to_client/2]).
 
--record(state, {from, id, snapshot, gets, puts, preflist, timerref, commit_responses}).
+-record(state, {from,
+                id,
+                snapshot,
+                gets,
+                puts,
+                preflist, 
+                timerref,
+                commit_responses,
+                commit_status,
+                commit_version}).
 
 -define(DEFAULT_TIMEOUT, 60000).
 
@@ -86,8 +95,7 @@ wait_for_vnode(
     NewStateData = StateData#state{commit_responses = NewCommitResponses},
     if
         NewCommitResponses == length(Preflist) ->
-            %{next_state, wait_for_transactions_committer, NewStateData};
-            {next_state, respond_to_client, NewStateData, 0};
+            {next_state, wait_for_transactions_committer, NewStateData};
 
         true ->
             {next_state, wait_for_vnode, NewStateData}
@@ -97,13 +105,25 @@ wait_for_vnode(timeout, StateData) ->
     % TODO
     {next_state, respond_to_client, StateData, 0}.
 
-wait_for_transactions_committer(_Message, StateData) ->
+wait_for_transactions_committer(timeout, StateData) ->
     % TODO
-    {next_state, respond_to_client, StateData, 0}.
+    {next_state, respond_to_client, StateData, 0};
 
-respond_to_client(timeout, #state{from = {raw, ReqId, Pid}} = StateData) ->
-    Reply = {ReqId, ok},
-    Pid ! Reply,
+wait_for_transactions_committer(
+  {transaction_commit_status, Id, CommitStatus, CommitVersion},
+  #state{id = Id} = StateData
+) ->
+    NewStateData = StateData#state{commit_status = CommitStatus,
+                                   commit_version = CommitVersion},
+    {next_state, respond_to_client, NewStateData, 0}.
+
+respond_to_client(timeout,
+                  #state{from = {raw, ReqId, Pid},
+                         commit_status = CommitStatus,
+                         commit_version = CommitVersion} = StateData) ->
+    ClientReply = {CommitStatus, CommitVersion},
+    FsmReply = {ReqId, ClientReply},
+    erlang:send(Pid, FsmReply),
     {stop, normal, StateData}.
 
 handle_event(_Event, _StateName, StateData) ->

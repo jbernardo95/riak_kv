@@ -1388,7 +1388,7 @@ handle_commit_transaction_request(
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     NVnodes = dict:size(PreflistMap),
-    Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes}),
+    Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
     riak_kv_log:append_record(Record, Idx),
 
     Reply = {ok, Idx, Id},
