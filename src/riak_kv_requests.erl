@@ -22,7 +22,7 @@
 -module(riak_kv_requests).
 
 %% API
--export([new_commit_transaction_request/4,
+-export([new_commit_transaction_request/5,
          new_put_request/6,
          new_get_request/2,
          new_w1c_put_request/3,
@@ -54,6 +54,7 @@
          get_snapshot/1,
          get_gets/1,
          get_puts/1,
+         get_n_vnodes/1,
          remove_option/2,
          request_type/1]).
 
@@ -89,7 +90,8 @@
     id :: non_neg_integer(),
     snapshot :: non_neg_integer(),
     gets :: [object()],
-    puts :: [object()]
+    puts :: [object()],
+    n_vnodes :: non_neg_integer()
 }).
 
 -record(riak_kv_put_req_v1, {
@@ -224,12 +226,14 @@ request_type(_)                                    -> unknown.
 -spec new_commit_transaction_request(non_neg_integer(),
                                      non_neg_integer(),
                                      [object()],
-                                     [object()]) -> commit_transaction_request().
-new_commit_transaction_request(Id, Snapshot, Gets, Puts) ->
+                                     [object()],
+                                     non_neg_integer()) -> commit_transaction_request().
+new_commit_transaction_request(Id, Snapshot, Gets, Puts, NVnodes) ->
     #riak_kv_commit_transaction_req_v1{id = Id,
                                        snapshot = Snapshot,
                                        gets = Gets,
-                                       puts = Puts}.
+                                       puts = Puts,
+                                       n_vnodes = NVnodes}.
 
 -spec new_put_request(bucket_key(),
                       object(),
@@ -408,6 +412,9 @@ get_gets(#riak_kv_commit_transaction_req_v1{gets = Gets}) ->
 
 get_puts(#riak_kv_commit_transaction_req_v1{puts = Puts}) ->
     Puts.
+
+get_n_vnodes(#riak_kv_commit_transaction_req_v1{n_vnodes = NVnodes}) ->
+    NVnodes.
 
 remove_option(#riak_kv_put_req_v1{options = Options}=Req, Option) ->
     NewOptions = proplists:delete(Option, Options),

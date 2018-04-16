@@ -16,7 +16,7 @@
 	     init/1,
 	     terminate/2]).
 
--define(DefaultBucket, <<"default_bucket">>).
+-define(DEFAULT_BUCKET, <<"default_bucket">>).
 
 -record(state, {client,
                 clock,
@@ -60,7 +60,7 @@ init(Node) ->
                            in_transaction = false,
                            id = undefined,
                            snapshot = undefined,
-                           gets = [],
+                           gets = dict:new(),
                            puts = dict:new()},
             {ok, State};
 
@@ -76,26 +76,31 @@ handle_call(
          snapshot = Snapshot,
          puts = Puts} = State
 ) ->
-    GetResult1 = do_get(Key, State),
+    Bkey = {?DEFAULT_BUCKET, Key},
+    GetResult1 = do_get(Bkey, State),
     ReadOnly = dict:size(Puts) == 0,
     GetResult = maybe_select_object_contents(GetResult1, Snapshot, ReadOnly),
-    NewState = maybe_set_snapshot(GetResult, State),
-    NewState1 = record_get(Key, NewState),
+    NewState2 = maybe_set_snapshot(GetResult, State),
+    NewState1 = maybe_record_get(GetResult, NewState2),
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            {reply, {error, transaction_aborted}, abort_transaction(NewState1)};
-
+            Reply = get_reply({error, transaction_aborted}),
+            NewState = abort_transaction(NewState1),
+            {reply, Reply, NewState};
         true ->
-            {reply, GetResult, NewState1}
+            Reply = get_reply(GetResult),
+            {reply, Reply, NewState1}
     end;
 
 % Single get 
 handle_call({get, Key}, _From, State) ->
     GetResult1 = do_get(Key, State),
     GetResult = maybe_select_object_contents(GetResult1, -1, false),
+
+    Reply = get_reply(GetResult),
     NewState = maybe_update_clock(GetResult, State),
-    {reply, GetResult, NewState};
+    {reply, Reply, NewState};
 
 % Transactional put 
 handle_call(
@@ -103,8 +108,9 @@ handle_call(
   _From,
   #state{in_transaction = true, puts = Puts} = State
  ) ->
-    Object = riak_object:new(?DefaultBucket, Key, Value),
-    NewPuts = dict:store(Key, Object, Puts),
+    Object = riak_object:new(?DEFAULT_BUCKET, Key, Value),
+    Bkey = riak_object:bkey(Object),
+    NewPuts = dict:store(Bkey, Object, Puts),
     NewState = State#state{puts = NewPuts},
     {reply, ok, NewState};
 
@@ -116,12 +122,12 @@ handle_call(
   #state{client = Client, clock = Clock} = State
  ) ->
     Id = erlang:phash2({self(), os:timestamp()}),
-    Object = riak_object:new(?DefaultBucket, Key, Value),
-
+    Object = riak_object:new(?DEFAULT_BUCKET, Key, Value),
     {Status, Version} = Client:commit_transaction(Id, Clock, [], [Object]),
 
-    NewState = Status#state{clock = Version},
-    {reply, Status, NewState};
+    Reply = commit_reply(Status),
+    NewState = State#state{clock = Version},
+    {reply, Reply, NewState};
 
 handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     Id = erlang:phash2({self(), os:timestamp()}),
@@ -140,18 +146,20 @@ handle_call(
   #state{client = Client,
          id = Id,
          snapshot = Snapshot,
-         gets = Gets,
+         gets = GetsDict,
          puts = PutsDict} = State
 ) ->
     % TODO handle cases in which the transaction did no do anything -> empty gets and puts
 
+    Gets = dict:fetch_keys(GetsDict),
     Puts = dict:fold(fun(_, Value, Acc) -> [Value | Acc] end, [], PutsDict),
 
     {Status, Version} = Client:commit_transaction(Id, Snapshot, Gets, Puts),
 
+    Reply = commit_reply(Status),
     NewState1 = clean_transaction_state(State),
     NewState = NewState1#state{clock = Version},
-    {reply, Status, NewState};
+    {reply, Reply, NewState};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
@@ -181,35 +189,35 @@ clean_transaction_state(State) ->
     State#state{in_transaction = false,
                 id = undefined,
                 snapshot = undefined,
-                gets = [],
+                gets = dict:new(),
                 puts = dict:new()}.
 
-do_get(Key, #state{client = Client, snapshot = undefined, clock = Clock}) ->
-    do_get_remote(Client, Key, Clock);
+% Non transactional get
+do_get(Bkey, #state{client = Client, snapshot = undefined, clock = Clock}) ->
+    do_get_remote(Client, Bkey, Clock);
 
-do_get(Key, #state{client = Client, snapshot = Snapshot, puts = Puts}) ->
-    case do_get_local(Key, Puts) of
+% Transactional get
+do_get(Bkey, #state{client = Client, snapshot = Snapshot, puts = Puts}) ->
+    case do_get_local(Bkey, Puts) of
         {ok, Object} -> {ok, Object, Snapshot};
-        _ -> do_get_remote(Client, Key, Snapshot)
+        _ -> do_get_remote(Client, Bkey, Snapshot)
     end.
 
-do_get_local(Key, Puts) ->
-    case dict:find(Key, Puts) of
+do_get_local(Bkey, Puts) ->
+    case dict:find(Bkey, Puts) of
         {ok, _} = Reply -> Reply;
         error -> {error, not_found}  
     end.
 
-do_get_remote(Client, Key, Snapshot) ->
-    case Client:get(?DefaultBucket, Key) of
+do_get_remote(Client, {Bucket, Key}, Snapshot) ->
+    case Client:get(Bucket, Key) of
         {ok, _Object, VnodeSnapshot} = Reply ->
             if
                 Snapshot > VnodeSnapshot ->
                     % TODO wait for node to be up to date
                     {error, node_snapshot_behind_local_snapshot};
-
                 true -> Reply
             end;
-
         {error, _, _} = Error ->
             Error
     end.
@@ -260,9 +268,10 @@ maybe_set_snapshot({_, _, VnodeSnapshot}, #state{snapshot = undefined} = State)
     State#state{snapshot = VnodeSnapshot};
 maybe_set_snapshot(_GetResult, State) -> State.
 
-record_get(Key, #state{gets = Gets} = State) ->
-    NewGets = [Key | Gets],
-    State#state{gets = NewGets}.
+maybe_record_get({ok, Object, _VnodeSnapshot}, #state{gets = Gets} = State) ->
+    NewGets = dict:store(riak_object:bkey(Object), ok, Gets),
+    State#state{gets = NewGets};
+maybe_record_get(_GetResult, State) -> State.
 
 maybe_update_clock({_, _, VnodeSnapshot}, State)
   when is_integer(VnodeSnapshot), VnodeSnapshot /= -1 ->
@@ -272,6 +281,13 @@ maybe_update_clock(_GetResult, State) -> State.
 check_get_conflict({ok, Object, _VnodeSnapshot}, Snapshot) ->
     riak_object:get_version(Object) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
+
+get_reply({ok, Object, _VnodeSnapshot}) -> {ok, Object};
+get_reply(GetResult) -> GetResult.
+
+commit_reply(committed) -> ok;
+commit_reply(aborted) -> {error, aborted};
+commit_reply(_Status) -> error.
 
 abort_transaction(State) ->
     % TODO eventually send message to vnodes to inform that the transaction aborted 

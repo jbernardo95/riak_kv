@@ -26,8 +26,8 @@
 -export([test_vnode/1, put/7]).
 -export([start_vnode/1,
          start_vnodes/1,
-         commit_transaction/5,
          commit_transaction/6,
+         commit_transaction/7,
          get/3,
          get/4,
          del/3,
@@ -248,11 +248,11 @@ start_vnodes(IdxList) ->
 test_vnode(I) ->
     riak_core_vnode:start_link(riak_kv_vnode, I, infinity).
 
-commit_transaction(Preflist, Id, Snapshot, Gets, Puts) ->
-    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, {fsm, undefined, self()}).
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes) ->
+    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, {fsm, undefined, self()}).
 
-commit_transaction(Preflist, Id, Snapshot, Gets, Puts, Sender) ->
-    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts),
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, Sender) ->
+    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NVnodes),
     riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
 get(Preflist, BKey, ReqId) ->
@@ -1371,15 +1371,12 @@ handle_commit_transaction_request(
 
     % Save puts as temporary
     Puts1 = riak_kv_requests:get_puts(Req),
-    FoldFun = fun({Object, Index}, {Puts2, PreflistMap1, State1}) ->
-                      if
-                          Index == Idx ->
-                              Bkey = riak_object:bkey(Object),
-                              {_, State2} = do_put(Bkey, Object, 0, 0, [], State1)
-                      end,
-                      {[riak_object:key(Object) | Puts2], dict:store(Index, ok, PreflistMap1), State2}
+    FoldFun = fun(Object, {Puts2, State1}) ->
+                      Bkey = riak_object:bkey(Object),
+                      {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
+                      {[riak_object:bkey(Object) | Puts2], State2}
               end,
-    {Puts, PreflistMap, NewState} = lists:foldl(FoldFun, {[], dict:new(), State}, Puts1),
+    {Puts, NewState} = lists:foldl(FoldFun, {[], State}, Puts1),
 
     % Append commit record to log
     PhysicalTimestamp = riak_kv_util:get_timestamp(),
@@ -1387,7 +1384,7 @@ handle_commit_transaction_request(
     Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
-    NVnodes = dict:size(PreflistMap),
+    NVnodes = riak_kv:get_n_vnodes(Req),
     Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
     riak_kv_log:append_record(Record, Idx),
 

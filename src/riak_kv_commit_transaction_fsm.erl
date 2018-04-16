@@ -20,7 +20,7 @@
                 snapshot,
                 gets,
                 puts,
-                preflist, 
+                preflist_puts, 
                 timerref,
                 commit_responses,
                 commit_status,
@@ -56,20 +56,27 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        snapshot = Snapshot,
                        gets = Gets,
                        puts = Puts,
-                       commit_responses = 0},
+                       preflist_puts = undefined,
+                       timerref = undefined,
+                       commit_responses = 0,
+                       commit_status = undefined,
+                       commit_version = undefined},
     {ok, prepare, StateData, 0}.
 
 prepare(timeout, #state{puts = Puts} = StateData) ->
-    FoldFun = fun(Object, {Preflist1, Puts1}) ->
-                      BKey = riak_object:bkey(Object),
-                      DocIdx = riak_core_util:chash_key(BKey),
-                      [{Index, _Pid} = Node] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
-                      {dict:store(Node, ok, Preflist1), [{Object, Index} | Puts1]}
-              end,
-    {PreflistMap, Puts2} = lists:foldl(FoldFun, {dict:new(), []}, Puts),
-    Preflist =  dict:fetch_keys(PreflistMap),
+    FoldFun = fun(Object, PreflistPuts1) ->
+                      Bkey = riak_object:bkey(Object),
+                      DocIdx = riak_core_util:chash_key(Bkey),
+                      [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
 
-    NewStateData = StateData#state{puts = Puts2, preflist = Preflist},
+                      case dict:find(Vnode, PreflistPuts1) of
+                          {ok, Puts1} -> dict:store(Vnode, [Object | Puts1], PreflistPuts1);
+                          error -> dict:store(Vnode, [Object], PreflistPuts1)
+                      end
+              end,
+    PreflistPuts = lists:foldl(FoldFun, dict:new(), Puts),
+
+    NewStateData = StateData#state{preflist_puts = PreflistPuts},
     {next_state, execute, NewStateData, 0}.
 
 execute(
@@ -77,10 +84,14 @@ execute(
   #state{id = Id,
          snapshot = Snapshot,
          gets = Gets,
-         puts = Puts,
-         preflist = Preflist} = StateData
+         preflist_puts = PreflistPuts} = StateData
 ) ->
-    riak_kv_vnode:commit_transaction(Preflist, Id, Snapshot, Gets, Puts),
+    Vnodes = dict:fetch_keys(PreflistPuts),
+    NVnodes = length(Vnodes),
+    lists:foreach(fun(Vnode) ->
+                          Puts = dict:fetch(Vnode, PreflistPuts),
+                          riak_kv_vnode:commit_transaction([Vnode], Id, Snapshot, Gets, Puts, NVnodes)
+                  end, Vnodes),
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
@@ -88,15 +99,15 @@ execute(
 
 wait_for_vnode(
   {ok, _Idx, _Id},
-  #state{preflist = Preflist,
+  #state{preflist_puts = PreflistPuts,
          commit_responses = CommitResponses} = StateData
 ) ->
     NewCommitResponses = CommitResponses + 1,
     NewStateData = StateData#state{commit_responses = NewCommitResponses},
+    NVnodes = dict:size(PreflistPuts),
     if
-        NewCommitResponses == length(Preflist) ->
+        NewCommitResponses == NVnodes ->
             {next_state, wait_for_transactions_committer, NewStateData};
-
         true ->
             {next_state, wait_for_vnode, NewStateData}
     end;
@@ -105,17 +116,17 @@ wait_for_vnode(timeout, StateData) ->
     % TODO
     {next_state, respond_to_client, StateData, 0}.
 
-wait_for_transactions_committer(timeout, StateData) ->
-    % TODO
-    {next_state, respond_to_client, StateData, 0};
-
 wait_for_transactions_committer(
   {transaction_commit_status, Id, CommitStatus, CommitVersion},
   #state{id = Id} = StateData
 ) ->
     NewStateData = StateData#state{commit_status = CommitStatus,
                                    commit_version = CommitVersion},
-    {next_state, respond_to_client, NewStateData, 0}.
+    {next_state, respond_to_client, NewStateData, 0};
+
+wait_for_transactions_committer(timeout, StateData) ->
+    % TODO
+    {next_state, respond_to_client, StateData, 0}.
 
 respond_to_client(timeout,
                   #state{from = {raw, ReqId, Pid},

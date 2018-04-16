@@ -29,6 +29,7 @@ start_link() ->
 
 print_state() ->
     gen_server:cast({global, ?MODULE}, print_state).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -74,11 +75,8 @@ main(#state{continuation = Continuation, n_records_read = NRecordsRead} = State)
     NRecordsLogged = riak_kv_log:get_n_records_logged(),
     N = (NRecordsLogged - 1) - NRecordsRead,
     {NewContinuation, Records} = read_records(?LOG, Continuation, N), 
-
-    NewState = lists:foldl(fun process_record/2, {NRecordsRead + 1, State}, Records),
-
-    NewState#state{continuation = NewContinuation,
-                   n_records_read = (NRecordsLogged - 1)}.
+    NewState = State#state{continuation = NewContinuation},
+    lists:foldl(fun process_record/2, NewState, Records).
 
 read_records(Log, Continuation, -1) ->
     read_records(Log, Continuation, 0);
@@ -97,37 +95,37 @@ read_records(Log, Continuation, N, Terms) ->
 process_record(
   #log_record{type = transaction_commit,
               payload = Payload} = Record,
-  {N, #state{running_transactions = RunningTransactions,
-             latest_object_versions = LatestObjectVersions} = State}
+  #state{n_records_read = NRecordsRead,
+         running_transactions = RunningTransactions,
+         latest_object_versions = LatestObjectVersions} = State
 ) ->
     lager:info("Processing log record ~p~n", [Record]),
 
-    {Id, _Snapshot, _Gets, _Puts, NVnodes, _Client} = Payload,
+    N = NRecordsRead + 1,
+    {Id, Snapshot, Gets, PayloadPuts, NVnodes, Client} = Payload,
 
     NewRunningTransactions = case dict:find(Id, RunningTransactions) of
-                                 {ok, Value} ->
-                                     if
-                                         (Value + 1) == NVnodes -> dict:erase(Id, RunningTransactions);
-                                         true -> dict:store(Id, Value + 1, RunningTransactions)
-                                     end;
-                                 error -> dict:store(Id, 1, RunningTransactions)
+                                 {ok, {Count1, Puts1}} -> dict:store(Id, {Count1 + 1, [PayloadPuts | Puts1]}, RunningTransactions);
+                                 error -> dict:store(Id, {1, PayloadPuts}, RunningTransactions)
                              end,
 
-    NewLatestObjectVersions = case dict:find(Id, RunningTransactions) of
-                                  error ->
-                                      commit_transaction(Payload, N, LatestObjectVersions);
-                                  _ ->
+    {Count, Puts} = dict:fetch(Id, RunningTransactions),
+    NewLatestObjectVersions = if
+                                  Count == NVnodes ->
+                                      commit_transaction(Id, Snapshot, Gets, Puts, Client, N, LatestObjectVersions);
+                                  true ->
                                       LatestObjectVersions
                               end,
 
-    {N + 1, State#state{running_transactions = NewRunningTransactions,
-                        latest_object_versions = NewLatestObjectVersions}};
+    State#state{n_records_read = N,
+                running_transactions = NewRunningTransactions,
+                latest_object_versions = NewLatestObjectVersions};
 
 process_record(_Record, Acc) -> Acc.
 
-commit_transaction({Id, Snapshot, Gets, Puts, _, Client}, Version, LatestObjectVersions) ->
-    {ConflictGets, NewLatestObjectVersions1} = check_conflicts(Gets, Snapshot, LatestObjectVersions, Version),
-    {ConflictPuts, NewLatestObjectVersions2} = check_conflicts(Puts, Snapshot, NewLatestObjectVersions1, Version),
+commit_transaction(Id, Snapshot, Gets, Puts, Client, Version, LatestObjectVersions) ->
+    {ConflictGets, _} = check_conflicts(Gets, Snapshot, Version, LatestObjectVersions),
+    {ConflictPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Version, LatestObjectVersions),
 
     Conflict = ConflictGets or ConflictPuts,
     if
@@ -145,26 +143,26 @@ commit_transaction({Id, Snapshot, Gets, Puts, _, Client}, Version, LatestObjectV
             % TODO
             % Send message to vnodes to commit temporary values
 
-            NewLatestObjectVersions2
+            NewLatestObjectVersions
     end.
 
-check_conflicts(Objects, Snapshot, LatestObjectVersions, Version) ->
-    check_conflicts(Objects, Snapshot, LatestObjectVersions, Version, false).
+check_conflicts(Objects, Snapshot, Version, LatestObjectVersions) ->
+    check_conflicts(Objects, Snapshot, Version, LatestObjectVersions, false).
 
-check_conflicts(_Objects, _Snapshot, LatestObjectVersions, _Version, true) ->
+check_conflicts(_Objects, _Snapshot, _Version, LatestObjectVersions, true) ->
     {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, LatestObjectVersions, _Version, Conflict) ->
+check_conflicts([], _Snapshot, _Version, LatestObjectVersions, Conflict) ->
     {Conflict, LatestObjectVersions};
-check_conflicts([Object | Rest], Snapshot, LatestObjectVersions, Version, Conflict) ->
-    LatestObjectVersion = case dict:find(Object, LatestObjectVersions) of
+check_conflicts([Bkey | Rest], Snapshot, Version, LatestObjectVersions, Conflict) ->
+    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
                               {ok, V} -> V;
                               error -> -1
                           end,
 
     NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Object, Version, LatestObjectVersions),
+    NewLatestObjectVersions = dict:store(Bkey, Version, LatestObjectVersions),
 
-    check_conflicts(Rest, Snapshot, NewLatestObjectVersions, Version, NewConflict).
+    check_conflicts(Rest, Snapshot, Version, NewLatestObjectVersions, NewConflict).
 
 send_transaction_commit_status_to(Client, TransactionId, Status, Version) ->
     Messsage = {transaction_commit_status, TransactionId, Status, Version},
