@@ -5,7 +5,6 @@
 -export([start_link/0,
          append_record/2,
          heartbeat/2,
-         get_n_records_logged/0,
          new_log_record/3]).
 
 -export([init/1,
@@ -19,7 +18,7 @@
 
 -define(PENDING_RECORDS_TABLE, pending_records).
 
--record(state, {heartbeats, tid, log, n_records_logged}).
+-record(state, {heartbeats, tid, log}).
 
 
 %%%===================================================================
@@ -36,10 +35,6 @@ append_record(Record, Partition) ->
 
 heartbeat(Partition, Clock) ->
     gen_server:cast({global, ?MODULE}, {heartbeat, Partition, Clock}).
-
-
-get_n_records_logged() ->
-    gen_server:call({global, ?MODULE}, get_n_records_logged).
 
 
 new_log_record(Timestamp, Type, Payload) ->
@@ -90,8 +85,7 @@ init(_Args) ->
     
     State = #state{heartbeats = Heartbeats,
                    tid = Tid,
-                   log = Log,
-                   n_records_logged = 0},
+                   log = Log},
     {ok, State}.
 
 
@@ -110,9 +104,6 @@ handle_call(
 
     State1 = State#state{heartbeats = Heartbeats1},
     {reply, ok, State1};
-
-handle_call(get_n_records_logged, _From, #state{n_records_logged = NRecordsLogged} = State) ->
-    {reply, NRecordsLogged, State};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at handle_call: ~p~n", [Request]),
@@ -136,9 +127,9 @@ handle_cast(Request, State) ->
 
 
 handle_info(append_stable_records_to_the_log, State) ->
-    NewState = append_stable_records_to_the_log(State),
+    append_stable_records_to_the_log(State),
     erlang:send_after(1000, self(), append_stable_records_to_the_log),
-    {noreply, NewState};
+    {noreply, State};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
@@ -176,16 +167,16 @@ append_stable_records_to_the_log(#state{heartbeats = Heartbeats} = State) ->
     StableTimestamp = get_stable_timestamp(Heartbeats),
     append_stable_records_to_the_log(StableTimestamp, State).
 
-append_stable_records_to_the_log(StableTimestamp, #state{log = Log, n_records_logged = NRecordsLogged} = State) ->
+append_stable_records_to_the_log(StableTimestamp, #state{log = Log} = State) ->
     case ets:first(?PENDING_RECORDS_TABLE) of
         {Timestamp, _Partition} = Key when Timestamp =< StableTimestamp ->
             [{_, Record}] = ets:lookup(?PENDING_RECORDS_TABLE, Key),
             disk_log:log(Log, Record),
             ets:delete(?PENDING_RECORDS_TABLE, Key),
-            append_stable_records_to_the_log(StableTimestamp, State#state{n_records_logged = NRecordsLogged + 1});
+            append_stable_records_to_the_log(StableTimestamp, State);
 
         _ ->
             lager:info("Stable records appended to the log (~p)~n", [StableTimestamp]),
             disk_log:sync(Log),
-            State
+            ok
     end.

@@ -278,13 +278,12 @@ merge(OldObject, NewObject) ->
             merge_write_once(OldObject, NewObj1);
         _ ->
             {Time,  {CRDT, Contents}} = timer:tc(fun merge_contents/3,
-                                                 [NewObject, OldObject, false]),
+                                                 [OldObject, NewObject, false]),
             ok = riak_kv_stat:update({riak_object_merge, CRDT, Time}),
-            OldObject#r_object{contents=Contents,
-                vclock=vclock:merge([OldObject#r_object.vclock,
-                    NewObj1#r_object.vclock]),
-                updatemetadata=dict:store(clean, true, dict:new()),
-                updatevalue=undefined}
+            OldObject#r_object{contents = Contents,
+                               vclock = vclock:merge([OldObject#r_object.vclock, NewObj1#r_object.vclock]),
+                               updatemetadata = dict:store(clean, true, dict:new()),
+                               updatevalue = undefined}
     end.
 
 %% @doc Special case write_once merge, in the case where the write_once property is
@@ -301,14 +300,56 @@ merge_write_once(OldObject, NewObject) ->
             NewObject
     end.
 
+append_merge_contents(
+  #r_object{contents = OldContents},
+  #r_object{contents = NewContents}
+) ->
+        [NewContent] = NewContents,
+        [NewContent | OldContents].
+
+transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) ->
+    Metadata = get_metadata(NewObject),
+    Id = dict:fetch(<<"transaction_id">>, Metadata),
+    Status = dict:fetch(<<"transaction_status">>, Metadata),
+    Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
+
+    lists:foldl(fun(#r_content{metadata = M} = C, Rest) ->
+                        TransactionId = dict:fetch(<<"transaction_id">>, M),
+                        if
+                            TransactionId == Id ->
+                                if
+                                    % If transaction was committed
+                                    % Commit temporary value by adding a version to it
+                                    Status == committed ->
+                                        NewM = dict:store(<<"version">>, Lsn, M),
+                                        [C#r_content{metadata = NewM} | Rest];
+
+                                    % Else discard the temporary value
+                                    Status == aborted ->
+                                        Rest
+                                end;
+                            true ->
+                                [C | Rest]
+                        end
+                end, [], OldContents).
+
+merge_contents(OldObject, NewObject, false) ->
+    Metadata = get_metadata(NewObject),
+
+    Result = case dict:find(<<"transaction_status">>, Metadata) of
+                 {ok, _} -> transaction_status_merge_contents(OldObject, NewObject);
+                 error -> append_merge_contents(OldObject, NewObject) 
+             end,
+
+    {undefined, Result};
 
 %% @doc Merge the r_objects contents by converting the inner dict to
 %%      a list, ensuring a sane order, and merging into a unique list.
-merge_contents(NewObject, OldObject, false) ->
-    Result = lists:umerge(fun compare/2,
-                          lists:usort(fun compare/2, NewObject#r_object.contents),
-                          lists:usort(fun compare/2, OldObject#r_object.contents)),
-    {undefined, Result};
+%merge_contents(NewObject, OldObject, false) ->
+    %Result = lists:umerge(fun compare/2,
+                          %lists:usort(fun compare/2, NewObject#r_object.contents),
+                          %lists:usort(fun compare/2, OldObject#r_object.contents)),
+    %{undefined, Result};
 
 %% @private with DVV enabled, use event dots in sibling metadata to
 %% remove dominated siblings and stop fake concurrency that causes
@@ -905,7 +946,7 @@ update(false, OldObject, NewObject, Actor, Timestamp) ->
     %% Assign an event to the new value
     Bucket = bucket(OldObject),
     DottedPutObject = assign_dot(NewObject, Dot, dvv_enabled(Bucket)),
-    MergedObject = merge(DottedPutObject, OldObject),
+    MergedObject = merge(OldObject, DottedPutObject),
     set_vclock(MergedObject, FrontierClock).
 
 -spec syntactic_merge(riak_object(), riak_object()) -> riak_object().

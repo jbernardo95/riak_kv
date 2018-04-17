@@ -17,6 +17,7 @@
 
 -record(state, {continuation,
                 n_records_read,
+                skip_n_records,
                 running_transactions,
                 latest_object_versions}).
 
@@ -38,6 +39,7 @@ init(_Args) ->
     erlang:send(self(), main),
     State = #state{continuation = start,
                    n_records_read = 0,
+                   skip_n_records = 0,
                    running_transactions = dict:new(),
                    latest_object_versions = dict:new()},
     {ok, State}.
@@ -71,25 +73,40 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-main(#state{continuation = Continuation, n_records_read = NRecordsRead} = State) ->
-    NRecordsLogged = riak_kv_log:get_n_records_logged(),
-    N = (NRecordsLogged - 1) - NRecordsRead,
-    {NewContinuation, Records} = read_records(?LOG, Continuation, N), 
-    NewState = State#state{continuation = NewContinuation},
+main(#state{continuation = Continuation, n_records_read = NRecordsRead, skip_n_records = SkipNRecords} = State) ->
+    % TODO this can be replced with disk_log:info() -> n_items
+    Info = disk_log:info(?LOG),
+    NRecordsLogged = proplists:get_value(no_items, Info, 0),
+    N = NRecordsLogged - NRecordsRead,
+
+    {NewContinuation, NewSkipNRecords, Records} = read_records(?LOG, Continuation, SkipNRecords, N), 
+
+    NewState = State#state{continuation = NewContinuation,
+                           skip_n_records = NewSkipNRecords},
+
     lists:foldl(fun process_record/2, NewState, Records).
 
-read_records(Log, Continuation, -1) ->
-    read_records(Log, Continuation, 0);
-read_records(Log, Continuation, N) ->
-    read_records(Log, Continuation, N, []).
+read_records(_Log, Continuation, SkipNRecords, 0) ->
+    {Continuation, SkipNRecords, []};
+read_records(Log, Continuation, 0, N) ->
+    do_read_records(Log, Continuation, N, []);
+read_records(Log, Continuation, SkipNRecords, N) ->
+    case disk_log:chunk(Log, Continuation, SkipNRecords) of
+        {Continuation1, Terms} ->
+            NewSkipNRecords = SkipNRecords - length(Terms),
+            read_records(Log, Continuation1, NewSkipNRecords, N)
+    end.
 
-read_records(_Log, Continuation, 0, Terms) ->
-    {Continuation, Terms};
-read_records(Log, Continuation, N, Terms) ->
+do_read_records(Log, Continuation, N, Terms) ->
     case disk_log:chunk(Log, Continuation, N) of
         {Continuation1, Terms1} ->
             NewN = N - length(Terms1),
-            read_records(Log, Continuation1, NewN, [Terms1 | Terms])
+            if
+                NewN == 0 ->
+                    {Continuation, N, Terms ++ Terms1};
+                true ->
+                    do_read_records(Log, Continuation1, NewN, Terms ++ Terms1)
+            end
     end.
 
 process_record(
@@ -101,69 +118,84 @@ process_record(
 ) ->
     lager:info("Processing log record ~p~n", [Record]),
 
-    N = NRecordsRead + 1,
-    {Id, Snapshot, Gets, PayloadPuts, NVnodes, Client} = Payload,
+    Lsn = NRecordsRead + 1,
+    {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,
 
-    NewRunningTransactions = case dict:find(Id, RunningTransactions) of
-                                 {ok, {Count1, Puts1}} -> dict:store(Id, {Count1 + 1, [PayloadPuts | Puts1]}, RunningTransactions);
-                                 error -> dict:store(Id, {1, PayloadPuts}, RunningTransactions)
+    Vnode = get_vnode(FirstPut),
+    NewRunningTransactions1 = case dict:find(Id, RunningTransactions) of
+                                 {ok, {Count1, Puts1}} ->
+                                     Puts2 = dict:store(Vnode, PayloadPuts, Puts1),
+                                     dict:store(Id, {Count1 + 1, Puts2}, RunningTransactions);
+                                 error ->
+                                     Puts2 = dict:store(Vnode, PayloadPuts, dict:new()),
+                                     dict:store(Id, {1, Puts2}, RunningTransactions)
                              end,
 
-    {Count, Puts} = dict:fetch(Id, RunningTransactions),
-    NewLatestObjectVersions = if
-                                  Count == NVnodes ->
-                                      commit_transaction(Id, Snapshot, Gets, Puts, Client, N, LatestObjectVersions);
-                                  true ->
-                                      LatestObjectVersions
-                              end,
+    {Count, Puts} = dict:fetch(Id, NewRunningTransactions1),
+    if
+        Count == NVnodes ->
+            NewRunningTransactions = dict:erase(Id, NewRunningTransactions1),
+            NewLatestObjectVersions = commit_transaction(Id, Snapshot, Gets, Puts, Client, Lsn, LatestObjectVersions);
+        true ->
+            NewRunningTransactions = NewRunningTransactions1,
+            NewLatestObjectVersions = LatestObjectVersions
+    end,
 
-    State#state{n_records_read = N,
+    State#state{n_records_read = Lsn,
                 running_transactions = NewRunningTransactions,
                 latest_object_versions = NewLatestObjectVersions};
 
-process_record(_Record, Acc) -> Acc.
+process_record(_Record, #state{n_records_read = NRecordsRead} = State) ->
+    State#state{n_records_read = NRecordsRead + 1}.
 
-commit_transaction(Id, Snapshot, Gets, Puts, Client, Version, LatestObjectVersions) ->
-    {ConflictGets, _} = check_conflicts(Gets, Snapshot, Version, LatestObjectVersions),
-    {ConflictPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Version, LatestObjectVersions),
+commit_transaction(Id, Snapshot, Gets, PutsDict, Client, Lsn, LatestObjectVersions) ->
+    {ConflictGets, _} = check_conflicts(Gets, Snapshot, Lsn, LatestObjectVersions),
+    Puts = dict:fold(fun(_, Value, Acc) -> Value ++ Acc end, [], PutsDict),
+    {ConflictPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Lsn, LatestObjectVersions),
 
+    Vnodes = dict:fetch_keys(PutsDict),
     Conflict = ConflictGets or ConflictPuts,
     if
         Conflict -> 
-            send_transaction_commit_status_to(Client, Id, aborted, Version),
-
-            % TODO
-            % Send message to vnodes to delete temporary values
-
+            send_transaction_commit_status_to(Client, Id, aborted, Lsn),
+            send_transaction_commit_status_to(Vnodes, Id, aborted, Lsn, PutsDict),
             LatestObjectVersions;
 
         true ->
-            send_transaction_commit_status_to(Client, Id, committed, Version),
-
-            % TODO
-            % Send message to vnodes to commit temporary values
-
+            send_transaction_commit_status_to(Client, Id, committed, Lsn),
+            send_transaction_commit_status_to(Vnodes, Id, committed, Lsn, PutsDict),
             NewLatestObjectVersions
     end.
 
-check_conflicts(Objects, Snapshot, Version, LatestObjectVersions) ->
-    check_conflicts(Objects, Snapshot, Version, LatestObjectVersions, false).
+check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
+    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
 
-check_conflicts(_Objects, _Snapshot, _Version, LatestObjectVersions, true) ->
+check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
     {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, _Version, LatestObjectVersions, Conflict) ->
+check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
     {Conflict, LatestObjectVersions};
-check_conflicts([Bkey | Rest], Snapshot, Version, LatestObjectVersions, Conflict) ->
+check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
     LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
                               {ok, V} -> V;
                               error -> -1
                           end,
 
     NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Bkey, Version, LatestObjectVersions),
+    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
 
-    check_conflicts(Rest, Snapshot, Version, NewLatestObjectVersions, NewConflict).
+    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
 
-send_transaction_commit_status_to(Client, TransactionId, Status, Version) ->
-    Messsage = {transaction_commit_status, TransactionId, Status, Version},
-    riak_core_vnode:reply(Client, Messsage).
+send_transaction_commit_status_to(Client, Id, Status, Lsn) ->
+    Reply = {transaction_commit_status, Id, Status, Lsn},
+    riak_core_vnode:reply(Client, Reply).
+
+send_transaction_commit_status_to(Vnodes, Id, Status, Lsn, PutsDict) ->
+    lists:foreach(fun(Vnode) ->
+                          Puts = dict:fetch(Vnode, PutsDict),
+                          riak_kv_vnode:transaction_commit_status([Vnode], Id, Status, Lsn, Puts)
+                  end, Vnodes).
+
+get_vnode(Bkey) ->
+    DocIdx = riak_core_util:chash_key(Bkey),
+    [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
+    Vnode.

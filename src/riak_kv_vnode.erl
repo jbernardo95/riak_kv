@@ -28,6 +28,8 @@
          start_vnodes/1,
          commit_transaction/6,
          commit_transaction/7,
+         transaction_commit_status/5,
+         transaction_commit_status/6,
          get/3,
          get/4,
          del/3,
@@ -253,6 +255,13 @@ commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes) ->
 
 commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, Sender) ->
     Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NVnodes),
+    riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
+
+transaction_commit_status(Preflist, Id, Status, Lsn, Puts) ->
+    transaction_commit_status(Preflist, Id, Status, Lsn, Puts, self()).
+
+transaction_commit_status(Preflist, Id, Status, Lsn, Puts, Sender) ->
+    Req = riak_kv_requests:new_transaction_status_request(Id, Status, Lsn, Puts),
     riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
 get(Preflist, BKey, ReqId) ->
@@ -552,6 +561,8 @@ handle_overload_command(Req, Sender, Idx) ->
 
 handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
+handle_overload_request(kv_transaction_status_request, _Req, Sender, Idx) ->
+    erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
 handle_overload_request(kv_get_request, Req, Sender, Idx) ->
@@ -808,6 +819,9 @@ handle_command(Req, Sender, State) ->
 %%        so crashing on unknown should work.
 handle_request(kv_commit_transaction_request, Req, Sender, State) ->
     NewState = handle_commit_transaction_request(Req, Sender, State),
+    {noreply, NewState};
+handle_request(kv_transaction_status_request, Req, Sender, State) ->
+    NewState = handle_transaction_status_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, State) ->
     {_Reply, NewState} = handle_put_request(Req, Sender, State),
@@ -1384,7 +1398,7 @@ handle_commit_transaction_request(
     Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
-    NVnodes = riak_kv:get_n_vnodes(Req),
+    NVnodes = riak_kv_requests:get_n_vnodes(Req),
     Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
     riak_kv_log:append_record(Record, Idx),
 
@@ -1392,6 +1406,28 @@ handle_commit_transaction_request(
     riak_core_vnode:reply(Sender, Reply),
 
     NewState#state{maximum_timestamp_used = Timestamp}.
+
+handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling transaction status request ~p at vnode ~p~n", [Req, Idx]),
+    
+    Id = riak_kv_requests:get_id(Req),
+    Status = riak_kv_requests:get_status(Req),
+    Lsn = riak_kv_requests:get_lsn(Req),
+    Puts = riak_kv_requests:get_puts(Req),
+
+    Metadata2 = dict:store(<<"transaction_id">>, Id, dict:new()),
+    Metadata1 = dict:store(<<"transaction_status">>, Status, Metadata2),
+    Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
+
+    NewState = State#state{snapshot = Lsn},
+
+    % Commit or discard each temporary put
+    lists:foldl(fun({Bucket, Key} = Bkey, State1) ->
+                        Object1 = riak_object:new(Bucket, Key, nil),
+                        Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
+                        {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
+                        State2
+                end, NewState, Puts).
 
 %% @private
 handle_put_request(

@@ -22,9 +22,9 @@
                 puts,
                 preflist_puts, 
                 timerref,
-                commit_responses,
-                commit_status,
-                commit_version}).
+                vnode_responses,
+                status,
+                lsn}).
 
 -define(DEFAULT_TIMEOUT, 60000).
 
@@ -58,9 +58,9 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        puts = Puts,
                        preflist_puts = undefined,
                        timerref = undefined,
-                       commit_responses = 0,
-                       commit_status = undefined,
-                       commit_version = undefined},
+                       vnode_responses = 0,
+                       status = undefined,
+                       lsn = undefined},
     {ok, prepare, StateData, 0}.
 
 prepare(timeout, #state{puts = Puts} = StateData) ->
@@ -100,13 +100,13 @@ execute(
 wait_for_vnode(
   {ok, _Idx, _Id},
   #state{preflist_puts = PreflistPuts,
-         commit_responses = CommitResponses} = StateData
+         vnode_responses = VnodeResponses} = StateData
 ) ->
-    NewCommitResponses = CommitResponses + 1,
-    NewStateData = StateData#state{commit_responses = NewCommitResponses},
+    NewVnodeResponses = VnodeResponses + 1,
+    NewStateData = StateData#state{vnode_responses = NewVnodeResponses},
     NVnodes = dict:size(PreflistPuts),
     if
-        NewCommitResponses == NVnodes ->
+        NewVnodeResponses == NVnodes ->
             {next_state, wait_for_transactions_committer, NewStateData};
         true ->
             {next_state, wait_for_vnode, NewStateData}
@@ -117,11 +117,11 @@ wait_for_vnode(timeout, StateData) ->
     {next_state, respond_to_client, StateData, 0}.
 
 wait_for_transactions_committer(
-  {transaction_commit_status, Id, CommitStatus, CommitVersion},
+  {transaction_commit_status, Id, Status, Lsn},
   #state{id = Id} = StateData
 ) ->
-    NewStateData = StateData#state{commit_status = CommitStatus,
-                                   commit_version = CommitVersion},
+    NewStateData = StateData#state{status = Status,
+                                   lsn = Lsn},
     {next_state, respond_to_client, NewStateData, 0};
 
 wait_for_transactions_committer(timeout, StateData) ->
@@ -130,9 +130,9 @@ wait_for_transactions_committer(timeout, StateData) ->
 
 respond_to_client(timeout,
                   #state{from = {raw, ReqId, Pid},
-                         commit_status = CommitStatus,
-                         commit_version = CommitVersion} = StateData) ->
-    ClientReply = {CommitStatus, CommitVersion},
+                         status = Status,
+                         lsn = Lsn} = StateData) ->
+    ClientReply = {Status, Lsn},
     FsmReply = {ReqId, ClientReply},
     erlang:send(Pid, FsmReply),
     {stop, normal, StateData}.
