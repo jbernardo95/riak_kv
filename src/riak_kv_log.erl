@@ -18,7 +18,11 @@
 
 -define(PENDING_RECORDS_TABLE, pending_records).
 
--record(state, {heartbeats, tid, log}).
+-record(state, {lsn,
+                heartbeats,
+                unstable_records_table_id,
+                log,
+                log_cache_table_id}).
 
 
 %%%===================================================================
@@ -61,8 +65,8 @@ init(_Args) ->
     ),
 
     % Create ets table to store unstable records 
-    EtsTableOptions = [ordered_set, named_table, private],
-    Tid = ets:new(?PENDING_RECORDS_TABLE, EtsTableOptions),
+    UnstableRecordsEtsTableOptions = [ordered_set, named_table, private],
+    UnstableRecordsTid = ets:new(?PENDING_RECORDS_TABLE, UnstableRecordsEtsTableOptions),
 
     % Open log
     {ok, LogOptions} = application:get_env(riak_kv, log),
@@ -70,7 +74,7 @@ init(_Args) ->
     LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/data",
     ok = filelib:ensure_dir(LogFile),
     DiskLogOptions = [
-        {name, riak_kv_log},
+        {name, ?LOG},
         {file, LogFile},
         {repair, true},
         {type, wrap},
@@ -81,11 +85,19 @@ init(_Args) ->
     lager:info("Disk log options ~p~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
 
+    % Create ets table to serve as a cache of the log
+    LogCacheEtsTableOptions = [set, named_table, public, {write_concurrency, true}],
+    LogCacheTid = ets:new(?LOG_CACHE, LogCacheEtsTableOptions),
+
+    ets:insert(?LOG_CACHE, {current_lsn, 0}),
+
     erlang:send(self(), append_stable_records_to_the_log),
     
-    State = #state{heartbeats = Heartbeats,
-                   tid = Tid,
-                   log = Log},
+    State = #state{lsn = 0,
+                   heartbeats = Heartbeats,
+                   unstable_records_table_id = UnstableRecordsTid,
+                   log = Log,
+                   log_cache_table_id = LogCacheTid},
     {ok, State}.
 
 
@@ -127,17 +139,17 @@ handle_cast(Request, State) ->
 
 
 handle_info(append_stable_records_to_the_log, State) ->
-    append_stable_records_to_the_log(State),
+    NewState = append_stable_records_to_the_log(State),
     erlang:send_after(1000, self(), append_stable_records_to_the_log),
-    {noreply, State};
+    {noreply, NewState};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
     {noreply, State}.
 
 
-terminate(_Reason, #state{log = Log}) ->
-    disk_log:close(Log),
+terminate(_Reason, _State) ->
+    disk_log:close(?LOG),
     ok.
 
 
@@ -163,8 +175,8 @@ get_stable_timestamp(Heartbeats) ->
         HeartbeatsList 
      ).
 
-verify_if_log_is_full(Log) ->
-    Info = disk_log:info(Log),
+verify_if_log_is_full() ->
+    Info = disk_log:info(?LOG),
     {SinceLogWasOpened, _} = proplists:get_value(no_overflows, Info, {0, 0}),
     if
         SinceLogWasOpened > 0 ->
@@ -174,21 +186,23 @@ verify_if_log_is_full(Log) ->
             ok
     end.
 
-append_stable_records_to_the_log(#state{log = Log, heartbeats = Heartbeats} = State) ->
-    verify_if_log_is_full(Log),
+append_stable_records_to_the_log(#state{heartbeats = Heartbeats} = State) ->
+    verify_if_log_is_full(),
     StableTimestamp = get_stable_timestamp(Heartbeats),
     append_stable_records_to_the_log(StableTimestamp, State).
 
-append_stable_records_to_the_log(StableTimestamp, #state{log = Log} = State) ->
+append_stable_records_to_the_log(StableTimestamp, #state{lsn = Lsn} = State) ->
     case ets:first(?PENDING_RECORDS_TABLE) of
         {Timestamp, _Partition} = Key when Timestamp =< StableTimestamp ->
             [{_, Record}] = ets:lookup(?PENDING_RECORDS_TABLE, Key),
-            disk_log:log(Log, Record),
+            ets:insert(?LOG_CACHE, {Lsn + 1, Record}),
+            disk_log:log(?LOG, Record),
             ets:delete(?PENDING_RECORDS_TABLE, Key),
-            append_stable_records_to_the_log(StableTimestamp, State);
+            append_stable_records_to_the_log(StableTimestamp, State#state{lsn = Lsn + 1});
 
         _ ->
+            ets:insert(?LOG_CACHE, {current_lsn, Lsn}),
             lager:info("Stable records appended to the log (~p)~n", [StableTimestamp]),
-            disk_log:sync(Log),
-            ok
+            disk_log:sync(?LOG),
+            State
     end.
