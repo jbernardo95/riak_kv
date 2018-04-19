@@ -163,7 +163,19 @@ get_stable_timestamp(Heartbeats) ->
         HeartbeatsList 
      ).
 
-append_stable_records_to_the_log(#state{heartbeats = Heartbeats} = State) ->
+verify_if_log_is_full(Log) ->
+    Info = disk_log:info(Log),
+    {SinceLogWasOpened, _} = proplists:get_value(no_overflows, Info, {0, 0}),
+    if
+        SinceLogWasOpened > 0 ->
+            lager:critical("Log is full~n", []),
+            exit(log_is_full);
+        true ->
+            ok
+    end.
+
+append_stable_records_to_the_log(#state{log = Log, heartbeats = Heartbeats} = State) ->
+    verify_if_log_is_full(Log),
     StableTimestamp = get_stable_timestamp(Heartbeats),
     append_stable_records_to_the_log(StableTimestamp, State).
 
