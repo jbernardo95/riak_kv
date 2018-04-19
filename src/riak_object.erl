@@ -313,25 +313,57 @@ transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) 
     Status = dict:fetch(<<"transaction_status">>, Metadata),
     Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
 
-    lists:foldl(fun(#r_content{metadata = M} = C, Rest) ->
-                        TransactionId = dict:fetch(<<"transaction_id">>, M),
-                        if
-                            TransactionId == Id ->
-                                if
-                                    % If transaction was committed
-                                    % Commit temporary value by adding a version to it
-                                    Status == committed ->
-                                        NewM = dict:store(<<"version">>, Lsn, M),
-                                        [C#r_content{metadata = NewM} | Rest];
+    MaximumObjectVersions = case Status of
+                                committed ->
+                                    app_helper:get_env(riak_kv, maximum_object_versions) - 1;
+                                aborted ->
+                                    app_helper:get_env(riak_kv, maximum_object_versions)
+                            end,
 
-                                    % Else discard the temporary value
-                                    Status == aborted ->
-                                        Rest
-                                end;
-                            true ->
-                                [C | Rest]
-                        end
-                end, [], OldContents).
+    % Sort OldContents in descending order
+    SortFun = fun(C1, C2) ->
+                      V1 = get_version(C1),
+                      V2 = get_version(C2),
+                      V1 >= V2
+              end,
+    SortedContents = lists:sort(SortFun, OldContents),
+
+    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
+                      TransactionId = dict:fetch(<<"transaction_id">>, M),
+                      if
+                          % Involved in the transaction
+                          TransactionId == Id ->
+                              if
+                                  % If transaction was committed
+                                  % Commit temporary value by adding a version to it
+                                  Status == committed ->
+                                      NewM = dict:store(<<"version">>, Lsn, M),
+                                      {Versions, [C#r_content{metadata = NewM} | Rest]};
+
+                                  % Else discard the temporary value
+                                  Status == aborted ->
+                                      {Versions, Rest}
+                              end;
+
+                          % Not involved in the transaction
+                          true ->
+                              case get_version(C) of
+                                  % Temporary value
+                                  -1 ->
+                                      {Versions, [C | Rest]};
+                                  % Committed value
+                                  _ ->
+                                      if
+                                          Versions < MaximumObjectVersions ->
+                                              {Versions + 1, [C | Rest]};
+                                          true ->
+                                              {Versions + 1, Rest}
+                                      end
+                              end
+                      end
+              end,
+    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, SortedContents),
+    MergedContents.
 
 merge_contents(OldObject, NewObject, false) ->
     Metadata = get_metadata(NewObject),
@@ -695,6 +727,15 @@ get_value(Object=#r_object{}) ->
 -spec get_version(riak_object()) -> non_neg_integer().
 get_version(#r_object{} = Object) ->
     Metadata = get_metadata(Object),
+    get_version(Metadata);
+
+get_version(#r_content{metadata = Metadata}) ->
+    get_version(Metadata);
+
+get_version({Metadata, _Value}) ->
+    get_version(Metadata);
+
+get_version(Metadata) ->
     case dict:find(?VERSION, Metadata) of
         {ok, Value} -> Value;
         error -> -1 

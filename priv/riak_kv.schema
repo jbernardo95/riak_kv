@@ -813,3 +813,9 @@
     {default, 5000},
     {commented, 5000}
 ]}.
+
+{mapping, "object.versions.maximum", "riak_kv.maximum_object_versions", [
+    {datatype, integer},
+    {default, 5},
+    {commented, 5}
+]}.

@@ -258,7 +258,7 @@ commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, Sender) ->
     riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
 transaction_commit_status(Preflist, Id, Status, Lsn, Puts) ->
-    transaction_commit_status(Preflist, Id, Status, Lsn, Puts, self()).
+    transaction_commit_status(Preflist, Id, Status, Lsn, Puts, {raw, undefined, self()}).
 
 transaction_commit_status(Preflist, Id, Status, Lsn, Puts, Sender) ->
     Req = riak_kv_requests:new_transaction_status_request(Id, Status, Lsn, Puts),
