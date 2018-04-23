@@ -137,22 +137,30 @@ client_test(NodeStr) when is_list(NodeStr) ->
 client_test(Node) ->
     case net_adm:ping(Node) of
         pong ->
-            case client_connect(Node) of
+            case riak_kv_transactional_client:start_link(Node) of
                 {ok, Client} ->
-                    case client_test_phase1(Client) of
+                    case do_client_test(Client) of
                         ok ->
-                            io:format("Successfully completed 1 read/write cycle to ~p\n", [Node]),
+                            io:format("Successfully completed 1 read cycle to ~p\n", [Node]),
                             ok;
                         error ->
+                            io:format("Error reading test key to ~s", [Node]),
                             error
                     end;
                 Error ->
-                    io:format("Error creating client connection to ~s: ~p",
-                              [Node, Error]),
+                    io:format("Error creating client connection to ~s: ~p", [Node, Error]),
                     error
             end;
         pang ->
             io:format("Node ~p is not reachable from ~p.", [Node, node()]),
+            error
+    end.
+
+do_client_test(Client) ->
+    case riak_kv_transactional_client:get(<<"test_key">>, Client) of
+        {error, notfound} ->
+            ok;
+        _ ->
             error
     end.
 
@@ -169,50 +177,3 @@ code_hash() ->
                          [C || {_, C, _} <- [code:get_object_code(M) || M <- AllMods]]
                         )),
     riak_core_util:integer_to_list(MD5Sum, 62).
-
-
-%%
-%% Internal functions for testing a Riak node through single read/write cycle
-%%
--define(CLIENT_TEST_BUCKET, <<"__riak_client_test__">>).
--define(CLIENT_TEST_KEY, <<"key1">>).
-
-client_test_phase1(Client) ->
-    case Client:get(?CLIENT_TEST_BUCKET, ?CLIENT_TEST_KEY, 1) of
-        {ok, Object} ->
-            client_test_phase2(Client, Object);
-        {error, notfound} ->
-            client_test_phase2(Client, riak_object:new(?CLIENT_TEST_BUCKET, ?CLIENT_TEST_KEY, undefined));
-        Error ->
-            io:format("Failed to read test value: ~p", [Error]),
-            error
-    end.
-
-client_test_phase2(Client, Object0) ->
-    Now = calendar:universal_time(),
-    Object = riak_object:update_value(Object0, Now),
-    case Client:put(Object, 1) of
-        {ok, _Timestamp} ->
-            client_test_phase3(Client, Now);
-        Error ->
-            io:format("Failed to write test value: ~p", [Error]),
-            error
-    end.
-
-client_test_phase3(Client, WrittenValue) ->
-    case Client:get(?CLIENT_TEST_BUCKET, ?CLIENT_TEST_KEY, 1) of
-        {ok, Object} ->
-            case lists:member(WrittenValue, riak_object:get_values(Object)) of
-                true ->
-                    ok;
-                false ->
-                    io:format(
-                        "Failed to find test value in list of objects."
-                        " Expected: ~p Actual: ~p",
-                        [WrittenValue, riak_object:get_values(Object)]),
-                    error
-            end;
-        Error ->
-            io:format("Failed to read test value: ~p", [Error]),
-            error
-    end.
