@@ -24,7 +24,8 @@
                 timerref,
                 vnode_responses,
                 status,
-                lsn}).
+                lsn,
+                timeout}).
 
 -define(DEFAULT_TIMEOUT, 60000).
 
@@ -60,7 +61,8 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        timerref = undefined,
                        vnode_responses = 0,
                        status = undefined,
-                       lsn = undefined},
+                       lsn = undefined,
+                       timeout = false},
     {ok, prepare, StateData, 0}.
 
 prepare(timeout, #state{puts = Puts} = StateData) ->
@@ -113,8 +115,8 @@ wait_for_vnode(
     end;
 
 wait_for_vnode(timeout, StateData) ->
-    % TODO
-    {next_state, respond_to_client, StateData, 0}.
+    NewStateData = StateData#state{timeout = true},
+    {next_state, respond_to_client, NewStateData, 0}.
 
 wait_for_transactions_committer(
   {transaction_commit_status, Id, Status, Lsn},
@@ -125,14 +127,18 @@ wait_for_transactions_committer(
     {next_state, respond_to_client, NewStateData, 0};
 
 wait_for_transactions_committer(timeout, StateData) ->
-    % TODO
-    {next_state, respond_to_client, StateData, 0}.
+    NewStateData = StateData#state{timeout = true},
+    {next_state, respond_to_client, NewStateData, 0}.
 
 respond_to_client(timeout,
                   #state{from = {raw, ReqId, Pid},
                          status = Status,
-                         lsn = Lsn} = StateData) ->
-    ClientReply = {Status, Lsn},
+                         lsn = Lsn,
+                         timeout = Timeout} = StateData) ->
+    ClientReply = if
+                      Timeout -> Timeout;
+                      true -> {Status, Lsn}
+                  end,
     FsmReply = {ReqId, ClientReply},
     erlang:send(Pid, FsmReply),
     {stop, normal, StateData}.
