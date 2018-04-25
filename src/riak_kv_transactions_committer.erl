@@ -52,7 +52,7 @@ handle_cast(Request, State) ->
 
 handle_info(main, State) ->
     NewState = main(State),
-    erlang:send_after(1000, self(), main),
+    erlang:send_after(500, self(), main),
     {noreply, NewState};
 
 handle_info(Info, State) ->
@@ -69,6 +69,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 main(#state{last_lsn_read = LastLsnRead} = State) ->
     [{_, CurrentLsn}] = ets:lookup(?LOG_CACHE, current_lsn),
+    lager:info("Processing ~p records~n", [CurrentLsn - LastLsnRead]),
 
     lists:foldl(
         fun(Lsn, State1) ->

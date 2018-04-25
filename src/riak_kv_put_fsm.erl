@@ -33,12 +33,12 @@
 
 -behaviour(gen_fsm).
 -define(DEFAULT_OPTS, [{returnbody, false}, {update_last_modified, true}]).
--export([start/4,start/7,start/8]).
--export([start_link/4,start_link/7,start_link/8]).
+-export([start/3,start/6,start/7]).
+-export([start_link/3,start_link/6,start_link/7]).
 -export([set_put_coordinator_failure_timeout/1,
          get_put_coordinator_failure_timeout/0]).
 -ifdef(TEST).
--export([test_link/5]).
+-export([test_link/4]).
 -endif.
 -export([init/1, handle_event/3, handle_sync_event/4,
          handle_info/3, terminate/3, code_change/4]).
@@ -86,7 +86,6 @@
 
 -record(state, {from :: {raw, integer(), pid()},
                 robj :: riak_object:riak_object(),
-                clock :: non_neg_integer(),
                 options=[] :: options(),
                 n :: pos_integer(),
                 w :: non_neg_integer(),
@@ -96,7 +95,6 @@
                 preflist2 :: riak_core_apl:preflist_ann(),
                 bkey :: {riak_object:bucket(), riak_object:key()},
                 req_id :: pos_integer(),
-                req_timestamp :: non_neg_integer(), % Timestamp assigned by the vnode
                 starttime :: pos_integer(), % start time to send to vnodes
                 timeout :: pos_integer()|infinity,
                 tref    :: reference(),
@@ -127,21 +125,21 @@
 %% ===================================================================
 
 %% In place only for backwards compatibility
-start(ReqId, RObj, Clock, W, DW, Timeout, ResultPid) ->
-    start_link(ReqId, RObj, Clock, W, DW, Timeout, ResultPid, []).
+start(ReqId, RObj, W, DW, Timeout, ResultPid) ->
+    start_link(ReqId, RObj, W, DW, Timeout, ResultPid, []).
 
 %% In place only for backwards compatibility
-start(ReqId, RObj, Clock, W, DW, Timeout, ResultPid, Options) ->
-    start_link(ReqId, RObj, Clock, W, DW, Timeout, ResultPid, Options).
+start(ReqId, RObj, W, DW, Timeout, ResultPid, Options) ->
+    start_link(ReqId, RObj, W, DW, Timeout, ResultPid, Options).
 
-start_link(ReqId, RObj, Clock, W, DW, Timeout, ResultPid) ->
-    start_link(ReqId, RObj, Clock, W, DW, Timeout, ResultPid, []).
+start_link(ReqId, RObj, W, DW, Timeout, ResultPid) ->
+    start_link(ReqId, RObj, W, DW, Timeout, ResultPid, []).
 
-start_link(ReqId, RObj, Clock, W, DW, Timeout, ResultPid, Options) ->
-    start({raw, ReqId, ResultPid}, RObj, Clock, [{w, W}, {dw, DW}, {timeout, Timeout} | Options]).
+start_link(ReqId, RObj, W, DW, Timeout, ResultPid, Options) ->
+    start({raw, ReqId, ResultPid}, RObj, [{w, W}, {dw, DW}, {timeout, Timeout} | Options]).
 
-start(From, Object, Clock, PutOptions) ->
-    Args = [From, Object, Clock, PutOptions],
+start(From, Object, PutOptions) ->
+    Args = [From, Object, PutOptions],
     case sidejob_supervisor:start_child(riak_kv_put_fsm_sj,
                                         gen_fsm, start_link,
                                         [?MODULE, Args, []]) of
@@ -156,7 +154,7 @@ start(From, Object, Clock, PutOptions) ->
 %% a riak_client instace between nodes during a rolling upgrade. The old
 %% `start_link' function has been renamed `start' since it doesn't actually link
 %% to the caller.
-start_link(From, Object, Clock, PutOptions) -> start(From, Object, Clock, PutOptions).
+start_link(From, Object, PutOptions) -> start(From, Object, PutOptions).
 
 set_put_coordinator_failure_timeout(MS) when is_integer(MS), MS >= 0 ->
     application:set_env(riak_kv, put_coordinator_failure_timeout, MS);
@@ -219,8 +217,8 @@ monitor_remote_coordinator(true = _UseAckP, MiddleMan, CoordNode, StateData) ->
 %% preflist2 - [{{Idx,Node},primary|fallback}] preference list
 %%
 %% As test, but linked to the caller
-test_link(From, Object, Clock, PutOptions, StateProps) ->
-    gen_fsm:start_link(?MODULE, {test, [From, Object, Clock, PutOptions], StateProps}, []).
+test_link(From, Object, PutOptions, StateProps) ->
+    gen_fsm:start_link(?MODULE, {test, [From, Object, PutOptions], StateProps}, []).
 
 -endif.
 
@@ -230,14 +228,13 @@ test_link(From, Object, Clock, PutOptions, StateProps) ->
 %% ====================================================================
 
 %% @private
-init([From, RObj, Clock, Options0]) ->
+init([From, RObj, Options0]) ->
     BKey = {Bucket, Key} = {riak_object:bucket(RObj), riak_object:key(RObj)},
     CoordTimeout = get_put_coordinator_failure_timeout(),
     Trace = app_helper:get_env(riak_kv, fsm_trace_enabled),
     Options = proplists:unfold(Options0),
     StateData = #state{from = From,
                        robj = RObj,
-                       clock = Clock,
                        bkey = BKey,
                        trace = Trace,
                        options = Options,
@@ -280,7 +277,6 @@ init({test, Args, StateProps}) ->
 %% @private
 prepare(timeout, StateData0 = #state{from = From,
                                      robj = RObj,
-                                     clock = Clock,
                                      bkey = BKey = {Bucket, _Key},
                                      options = Options,
                                      trace = Trace,
@@ -347,7 +343,7 @@ prepare(timeout, StateData0 = #state{from = From,
                                                [{ack_execute, self()}|Options]),
                         MiddleMan = spawn_coordinator_proc(
                                       CoordNode, riak_kv_put_fsm, start_link,
-                                      [From, RObj, Clock, Options2]),
+                                      [From, RObj, Options2]),
                         ?DTRACE(Trace, ?C_PUT_FSM_PREPARE, [2],
                                 ["prepare", atom2list(CoordNode)]),
                         ok = riak_kv_stat:update(coord_redir),
@@ -540,7 +536,6 @@ execute(State=#state{options = Options, coord_pl_entry = CPL}) ->
 %% will guarantee a frontier object.
 %% N.B. Not actually a state - here in the source to make reading the flow easier
 execute_local(StateData=#state{robj = RObj,
-                               clock = Clock,
                                req_id = ReqId,
                                timeout = Timeout,
                                bkey = BKey,
@@ -557,7 +552,7 @@ execute_local(StateData=#state{robj = RObj,
                 StateData
         end,
     TRef = schedule_timeout(Timeout),
-    riak_kv_vnode:coord_put(CoordPLEntry, BKey, RObj, Clock, ReqId, StartTime, VnodeOptions),
+    riak_kv_vnode:coord_put(CoordPLEntry, BKey, RObj, ReqId, StartTime, VnodeOptions),
     StateData2 = StateData1#state{robj = RObj, tref = TRef},
     %% Must always wait for local vnode - it contains the object with updated vclock
     %% to use for the remotes. (Ignore optimization for N=1 case for now).
@@ -576,10 +571,10 @@ waiting_local_vnode(Result, StateData = #state{putcore = PutCore,
                     [integer_to_list(Idx)]),
             %% Local vnode failure is enough to sink whole operation
             process_reply({error, Reason}, StateData#state{putcore = UpdPutCore1});
-        {w, Idx, _ReqId, Timestamp} ->
+        {w, Idx, _ReqId} ->
             ?DTRACE(Trace, ?C_PUT_FSM_WAITING_LOCAL_VNODE, [1],
                     [integer_to_list(Idx)]),
-            {next_state, waiting_local_vnode, StateData#state{putcore = UpdPutCore1, req_timestamp = Timestamp}};
+            {next_state, waiting_local_vnode, StateData#state{putcore = UpdPutCore1}};
         {dw, Idx, PutObj, _ReqId} ->
             %% Either returnbody is true or coord put merged with the existing
             %% object and bumped the vclock.  Either way use the returned
@@ -785,10 +780,10 @@ process_reply(Reply, StateData = #state{postcommit = PostCommit,
                          StateData1#state{putcore = UpdPutCore}
                  end,
     case Reply of
-        {ok, _} ->
+        ok ->
             ?DTRACE(Trace, ?C_PUT_FSM_PROCESS_REPLY, [0], []),
             new_state_timeout(postcommit, StateData2);
-        {ok, _, _} ->
+        {ok, _} ->
             Values = riak_object:get_values(RObj),
             %% TODO: more accurate sizing method
             case Trace of

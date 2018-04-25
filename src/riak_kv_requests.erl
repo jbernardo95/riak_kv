@@ -24,7 +24,7 @@
 %% API
 -export([new_commit_transaction_request/5,
          new_transaction_status_request/4,
-         new_put_request/6,
+         new_put_request/5,
          new_get_request/2,
          new_w1c_put_request/3,
          new_listkeys_request/3,
@@ -48,7 +48,6 @@
          get_encoded_obj/1,
          get_replica_type/1,
          get_request_id/1,
-         get_client_clock/1,
          get_start_time/1,
          get_options/1,
          get_id/1,
@@ -108,7 +107,6 @@
 -record(riak_kv_put_req_v1, {
     bkey :: bucket_key(),
     object :: object(),
-    client_clock :: non_neg_integer(),
     req_id :: request_id(),
     start_time :: start_time(),
     options :: request_options()
@@ -262,14 +260,12 @@ new_transaction_status_request(Id, Status, Lsn, Puts) ->
 
 -spec new_put_request(bucket_key(),
                       object(),
-                      non_neg_integer(),
                       request_id(),
                       start_time(),
                       request_options()) -> put_request().
-new_put_request(BKey, Object, ClientClock, ReqId, StartTime, Options) ->
+new_put_request(BKey, Object, ReqId, StartTime, Options) ->
     #riak_kv_put_req_v1{bkey = BKey,
                         object = Object,
-                        client_clock = ClientClock,
                         req_id = ReqId,
                         start_time = StartTime,
                         options = Options}.
@@ -415,10 +411,6 @@ get_request_id(#riak_kv_put_req_v1{req_id = ReqId}) ->
     ReqId;
 get_request_id(#riak_kv_get_req_v1{req_id = ReqId}) ->
     ReqId.
-
--spec get_client_clock(put_request()) -> non_neg_integer().
-get_client_clock(#riak_kv_put_req_v1{client_clock = ClientClock}) ->
-    ClientClock.
 
 get_start_time(#riak_kv_put_req_v1{start_time = StartTime}) ->
     StartTime.

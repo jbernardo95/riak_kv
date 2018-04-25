@@ -808,12 +808,6 @@
     {commented, 10}
 ]}.
 
-{mapping, "riak_kv.log.heartbeat_interval", "riak_kv.log.heartbeat_interval", [
-    {datatype, integer},
-    {default, 5000},
-    {commented, 5000}
-]}.
-
 {mapping, "object.versions.maximum", "riak_kv.maximum_object_versions", [
     {datatype, integer},
     {default, 5},

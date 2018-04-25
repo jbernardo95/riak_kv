@@ -2,7 +2,6 @@
 -define(LOG_CACHE, riak_kv_log_cache).
 
 -record(log_record, {
-    timestamp,
     type,
     payload
 }). 

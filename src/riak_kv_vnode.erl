@@ -38,7 +38,7 @@
          local_put/2,
          local_put/3,
          local_reap/3,
-         coord_put/7,
+         coord_put/6,
          readrepair/6,
          list_keys/4,
          fold/3,
@@ -124,7 +124,6 @@
 -type update_hook() :: module().
 
 -record(state, {idx :: partition(),
-                maximum_timestamp_used :: non_neg_integer(),
                 mod :: module(),
                 async_put :: boolean(),
                 modstate :: term(),
@@ -146,7 +145,6 @@
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
-                heartbeat_interval :: non_neg_integer(),
                 snapshot :: non_neg_integer()}). % The latest log position the vnode is aware of
 
 -type index_op() :: add | remove.
@@ -293,12 +291,8 @@ put(Preflist, BKey, Obj, ReqId, StartTime, Options) when is_integer(StartTime) -
 
 put(Preflist, BKey, Obj, ReqId, StartTime, Options, Sender)
   when is_integer(StartTime) ->
-    put(Preflist, BKey, Obj, 0, ReqId, StartTime, Options, Sender).
-
-put(Preflist, BKey, Obj, ClientClock, ReqId, StartTime, Options, Sender)
-  when is_integer(StartTime) ->
     Req = riak_kv_requests:new_put_request(
-        sanitize_bkey(BKey), Obj, ClientClock, ReqId, StartTime, Options),
+        sanitize_bkey(BKey), Obj, ReqId, StartTime, Options),
     riak_core_vnode_master:command(Preflist,
                                    Req,
                                    Sender,
@@ -342,12 +336,12 @@ refresh_index_data(Partition, BKey, IdxData, TimeOut) ->
 
 %% Issue a put for the object to the preflist, expecting a reply
 %% to an FSM.
-coord_put(IndexNode, BKey, Obj, ClientClock, ReqId, StartTime, Options) when is_integer(StartTime) ->
-    coord_put(IndexNode, BKey, Obj, ClientClock, ReqId, StartTime, Options, {fsm, undefined, self()}).
+coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options) when is_integer(StartTime) ->
+    coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options, {fsm, undefined, self()}).
 
-coord_put(IndexNode, BKey, Obj, ClientClock, ReqId, StartTime, Options, Sender)
+coord_put(IndexNode, BKey, Obj, ReqId, StartTime, Options, Sender)
   when is_integer(StartTime) ->
-    put([IndexNode], BKey, Obj, ClientClock, ReqId, StartTime, [coord | Options], Sender).
+    put([IndexNode], BKey, Obj, ReqId, StartTime, [coord | Options], Sender).
 
 %% Do a put without sending any replies
 readrepair(Preflist, BKey, Obj, ReqId, StartTime, Options) ->
@@ -501,9 +495,6 @@ init([Index]) ->
                 lager:debug("No metadata cache size defined, not starting"),
                 undefined
         end,
-    {ok, LogOptions} = application:get_env(riak_kv, log),
-    LogOptionsDict = dict:from_list(LogOptions),
-    HeartbeatInterval = dict:fetch(heartbeat_interval, LogOptionsDict),
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
@@ -514,7 +505,6 @@ init([Index]) ->
                     false
             end,
             State = #state{idx=Index,
-                           maximum_timestamp_used = 0,
                            async_folding=AsyncFolding,
                            mod=Mod,
                            async_put = DoAsyncPut,
@@ -530,10 +520,8 @@ init([Index]) ->
                            md_cache=MDCache,
                            md_cache_size=MDCacheSize,
                            update_hook=update_hook(),
-                           heartbeat_interval = HeartbeatInterval,
                            snapshot = 0},
             try_set_vnode_lock_limit(Index),
-            send_heartbeat_after(HeartbeatInterval),
             case AsyncFolding of
                 true ->
                     %% Create worker pool initialization tuple
@@ -795,22 +783,6 @@ handle_command({reformat_object, BKey}, _Sender, State) ->
     {Reply, UpdState} = do_reformat(BKey, State),
     {reply, Reply, UpdState};
 
-handle_command(send_heartbeat, _Sender, 
-               #state{idx = Idx,
-                      maximum_timestamp_used = MaximumTimestampUsed,
-                      heartbeat_interval = HeartbeatInterval} = State) ->
-    % Send heartbeat to riak_kv_log
-    PhysicalTimestamp = riak_kv_util:get_timestamp(),
-    MaximumTimestampUsed1 = max(PhysicalTimestamp, MaximumTimestampUsed),
-    %lager:info("Sending heartbeat to riak_kv_log from partition ~p with clock ~p~n", [Idx, MaximumTimestampUsed1]),
-    riak_kv_log:heartbeat(Idx, MaximumTimestampUsed1),
-
-    % Schedule next heartbeat sending
-    send_heartbeat_after(HeartbeatInterval),
-
-    NewState = State#state{maximum_timestamp_used = MaximumTimestampUsed1},
-    {noreply, NewState};
-
 handle_command(Req, Sender, State) ->
     handle_request(riak_kv_requests:request_type(Req), Req, Sender, State).
 
@@ -823,9 +795,14 @@ handle_request(kv_commit_transaction_request, Req, Sender, State) ->
 handle_request(kv_transaction_status_request, Req, Sender, State) ->
     NewState = handle_transaction_status_request(Req, Sender, State),
     {noreply, NewState};
-handle_request(kv_put_request, Req, Sender, State) ->
-    {_Reply, NewState} = handle_put_request(Req, Sender, State),
-    {noreply, NewState};
+handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
+    StartTS = os:timestamp(),
+    ReqId = riak_kv_requests:get_request_id(Req),
+    riak_core_vnode:reply(Sender, {w, Idx, ReqId}),
+    {Reply, UpdState} = do_put(Req, State),
+    riak_core_vnode:reply(Sender, Reply),
+    update_vnode_stats(vnode_put, Idx, StartTS),
+    {noreply, UpdState};
 handle_request(kv_get_request, Req, Sender, State) ->
     BKey = riak_kv_requests:get_bucket_key(Req),
     ReqId = riak_kv_requests:get_request_id(Req),
@@ -1040,23 +1017,34 @@ handle_handoff_command(Req, Sender, State) ->
     handle_handoff_request(ReqType, Req, Sender, State).
 
 handle_handoff_request(kv_put_request, Req, Sender, State) ->
-    {Reply, NewState} = handle_put_request(Req, Sender, State),
-
     case riak_kv_requests:is_coordinated_put(Req) of
         false ->
+            {noreply, NewState} = handle_command(Req, Sender, State),
             {forward, NewState};
         true ->
+            %% riak_kv#1046 - don't make fake siblings. Perform the
+            %% put, and create a new request to forward on, that
+            %% contains the frontier, much like the value returned to
+            %% a put fsm, then replicated.
+            #state{idx = Idx} = State,
+            ReqId = riak_kv_requests:get_request_id(Req),
+            StartTS = os:timestamp(),
+            riak_core_vnode:reply(Sender, {w, Idx, ReqId}),
+            {Reply, UpdState} = do_put(Req, State),
+            riak_core_vnode:reply(Sender, Reply),
+            update_vnode_stats(vnode_put, Idx, StartTS),
+
             case Reply of
                 %%  NOTE: Coord is always `returnbody` as a put arg
-                {dw, _Idx, NewObj, _ReqId} ->
+                {dw, Idx, NewObj, ReqId} ->
                     %% DO NOT coordinate again at the next owner!
                     NewReq1 = riak_kv_requests:remove_option(Req, coord),
                     NewReq = riak_kv_requests:set_object(NewReq1, NewObj),
-                    {forward, NewReq, NewState};
+                    {forward, NewReq, UpdState};
                 _Error ->
                     %% Don't forward a failed attempt to put, as you
                     %% need the successful object
-                    {noreply, NewState}
+                    {noreply, UpdState}
             end
     end;
 handle_handoff_request(kv_w1c_put_request, Request, Sender, State) ->
@@ -1352,10 +1340,6 @@ ready_to_exit() ->
     [] =:= riak_kv_ensembles:local_ensembles().
 
 %% @private
-send_heartbeat_after(HeartbeatInterval) ->
-    riak_core_vnode:send_command_after(HeartbeatInterval, send_heartbeat).
-
-%% @private
 forward_put({Idx, Node}, Key, Obj, From) ->
     Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
     riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_put, Key, Obj, From}),
@@ -1375,12 +1359,7 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_commit_transaction_request(
-  Req,
-  Sender,
-  #state{idx = Idx,
-         maximum_timestamp_used  = MaximumTimestampUsed} = State
-) ->
+handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     % Save puts as temporary
@@ -1393,19 +1372,17 @@ handle_commit_transaction_request(
     {Puts, NewState} = lists:foldl(FoldFun, {[], State}, Puts1),
 
     % Append commit record to log
-    PhysicalTimestamp = riak_kv_util:get_timestamp(),
-    Timestamp = max(MaximumTimestampUsed + 1, PhysicalTimestamp),
     Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     NVnodes = riak_kv_requests:get_n_vnodes(Req),
-    Record = riak_kv_log:new_log_record(Timestamp, transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
-    riak_kv_log:append_record(Record, Idx),
+    Record = riak_kv_log:new_log_record(transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
+    riak_kv_log:append_record(Record),
 
     Reply = {ok, Idx, Id},
     riak_core_vnode:reply(Sender, Reply),
 
-    NewState#state{maximum_timestamp_used = Timestamp}.
+    NewState.
 
 handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
     lager:info("Handling transaction status request ~p at vnode ~p~n", [Req, Idx]),
@@ -1428,45 +1405,6 @@ handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
                         {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
                         State2
                 end, NewState, Puts).
-
-%% @private
-handle_put_request(
-  Req,
-  Sender,
-  #state{idx = Idx,
-         maximum_timestamp_used = MaximumTimestampUsed} = State
-) ->
-    lager:info("Handling put request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
-
-    StartTS = os:timestamp(),
-
-    % Calculate causal timestamp
-    ClientClock = riak_kv_requests:get_client_clock(Req),
-    PhysicalTimestamp = riak_kv_util:get_timestamp(),
-    ReqTimestamp = max(ClientClock + 1, max(MaximumTimestampUsed + 1, PhysicalTimestamp)),
-
-    % Append record to log
-    ReqId = riak_kv_requests:get_request_id(Req),
-    Record = riak_kv_log:new_log_record(ReqTimestamp, put, ReqId),
-    riak_kv_log:append_record(Record, Idx),
-
-    % Respond to client
-    riak_core_vnode:reply(Sender, {w, Idx, ReqId, ReqTimestamp}),
-
-    % Attach timestamp to object
-    %Object = riak_kv_requests:get_object(Req),
-    %Object1 = riak_object:set_timestamp(Object, ReqTimestamp),
-
-    % Store object 
-    NewState1 = State#state{maximum_timestamp_used = ReqTimestamp},
-    %Req1 = riak_kv_requests:set_object(Req, Object1),
-    {Reply, NewState} = do_put(Req, NewState1),
-
-    riak_core_vnode:reply(Sender, Reply),
-
-    update_vnode_stats(vnode_put, Idx, StartTS),
-
-    {Reply, NewState}.
 
 %% @private
 do_put(Request, State) ->

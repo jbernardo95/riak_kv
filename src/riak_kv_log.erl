@@ -3,9 +3,8 @@
 -behaviour(gen_server).
 
 -export([start_link/0,
-         append_record/2,
-         heartbeat/2,
-         new_log_record/3]).
+         append_record/1,
+         new_log_record/2]).
 
 -export([init/1,
          handle_call/3,
@@ -16,11 +15,7 @@
 
 -include("riak_kv_log.hrl").
 
--define(PENDING_RECORDS_TABLE, pending_records).
-
 -record(state, {lsn,
-                heartbeats,
-                unstable_records_table_id,
                 log,
                 log_cache_table_id}).
 
@@ -33,17 +28,12 @@ start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
 
-append_record(Record, Partition) ->
-    gen_server:call({global, ?MODULE}, {append_record, Record, Partition}).
+append_record(Record) ->
+    gen_server:call({global, ?MODULE}, {append_record, Record}).
 
 
-heartbeat(Partition, Clock) ->
-    gen_server:cast({global, ?MODULE}, {heartbeat, Partition, Clock}).
-
-
-new_log_record(Timestamp, Type, Payload) ->
-    #log_record{timestamp = Timestamp,
-                type = Type,
+new_log_record(Type, Payload) ->
+    #log_record{type = Type,
                 payload = Payload}.
 
 
@@ -52,22 +42,6 @@ new_log_record(Timestamp, Type, Payload) ->
 %%%===================================================================
 
 init(_Args) ->
-    % Initialize heartbeats dictionary
-    {ok, Ring} = riak_core_ring_manager:get_my_ring(),
-    PrefLists = riak_core_ring:all_preflists(Ring, 1),
-    Heartbeats = lists:foldl(
-        fun(PrefList, Dict) ->
-            {Partition, _Node} = hd(PrefList),
-            dict:store(Partition, 0, Dict)
-        end,
-        dict:new(),
-        PrefLists
-    ),
-
-    % Create ets table to store unstable records 
-    UnstableRecordsEtsTableOptions = [ordered_set, named_table, private],
-    UnstableRecordsTid = ets:new(?PENDING_RECORDS_TABLE, UnstableRecordsEtsTableOptions),
-
     % Open log
     {ok, LogOptions} = application:get_env(riak_kv, log),
     LogOptionsDict = dict:from_list(LogOptions),
@@ -91,57 +65,35 @@ init(_Args) ->
 
     ets:insert(?LOG_CACHE, {current_lsn, 0}),
 
-    erlang:send(self(), append_stable_records_to_the_log),
-    
     State = #state{lsn = 0,
-                   heartbeats = Heartbeats,
-                   unstable_records_table_id = UnstableRecordsTid,
                    log = Log,
                    log_cache_table_id = LogCacheTid},
     {ok, State}.
 
 
-handle_call(
-  {append_record, #log_record{timestamp = Timestamp} = Record, Partition},
-  _From,
-  #state{heartbeats = Heartbeats} = State
- )->
-    %lager:info("Received record ~p to append from partition ~p~n", [Record, Partition]),
+handle_call({append_record, Record}, _From, #state{lsn = Lsn} = State)->
+    verify_if_log_is_full(),
 
-    % Insert record in ets table
-    ets:insert(?PENDING_RECORDS_TABLE, {{Timestamp, Partition}, Record}),
+    disk_log:log(?LOG, Record),
+    disk_log:sync(?LOG),
 
-    % Store heartbeat from partition
-    Heartbeats1 = dict:store(Partition, Timestamp, Heartbeats),
+    ets:insert(?LOG_CACHE, {Lsn + 1, Record}),
+    ets:insert(?LOG_CACHE, {current_lsn, Lsn + 1}),
 
-    State1 = State#state{heartbeats = Heartbeats1},
-    {reply, ok, State1};
+    lager:info("Record ~p was appended to the log~n", [Record]),
+
+    NewState = State#state{lsn = Lsn + 1},
+    {reply, ok, NewState};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at handle_call: ~p~n", [Request]),
     {reply, error, State}.
 
 
-handle_cast(
-  {heartbeat, Partition, Clock},
-  #state{heartbeats = Heartbeats} = State
- )->
-    % Store hearbeat from partition
-    Heartbeats1 = dict:store(Partition, Clock, Heartbeats),
-
-    State1 = State#state{heartbeats = Heartbeats1},
-    {noreply, State1};
-
-
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at handle_cast: ~p~n", [Request]),
     {noreply, State}.
 
-
-handle_info(append_stable_records_to_the_log, State) ->
-    NewState = append_stable_records_to_the_log(State),
-    erlang:send_after(1000, self(), append_stable_records_to_the_log),
-    {noreply, NewState};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
@@ -161,20 +113,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-get_stable_timestamp(Heartbeats) ->
-    HeartbeatsList = dict:to_list(Heartbeats),
-    {_Partition, Clock} = hd(HeartbeatsList),
-    lists:foldl(
-        fun({_Partition1, Clock1}, Min) ->
-            if
-                Clock1 < Min -> Clock1;
-                true -> Min
-            end
-        end,
-        Clock,
-        HeartbeatsList 
-     ).
-
 verify_if_log_is_full() ->
     Info = disk_log:info(?LOG),
     {SinceLogWasOpened, _} = proplists:get_value(no_overflows, Info, {0, 0}),
@@ -184,25 +122,4 @@ verify_if_log_is_full() ->
             exit(log_is_full);
         true ->
             ok
-    end.
-
-append_stable_records_to_the_log(#state{heartbeats = Heartbeats} = State) ->
-    verify_if_log_is_full(),
-    StableTimestamp = get_stable_timestamp(Heartbeats),
-    append_stable_records_to_the_log(StableTimestamp, State).
-
-append_stable_records_to_the_log(StableTimestamp, #state{lsn = Lsn} = State) ->
-    case ets:first(?PENDING_RECORDS_TABLE) of
-        {Timestamp, _Partition} = Key when Timestamp =< StableTimestamp ->
-            [{_, Record}] = ets:lookup(?PENDING_RECORDS_TABLE, Key),
-            ets:insert(?LOG_CACHE, {Lsn + 1, Record}),
-            disk_log:log(?LOG, Record),
-            ets:delete(?PENDING_RECORDS_TABLE, Key),
-            append_stable_records_to_the_log(StableTimestamp, State#state{lsn = Lsn + 1});
-
-        _ ->
-            ets:insert(?LOG_CACHE, {current_lsn, Lsn}),
-            lager:info("Stable records appended to the log (~p)~n", [StableTimestamp]),
-            disk_log:sync(?LOG),
-            State
     end.
