@@ -69,7 +69,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 main(#state{last_lsn_read = LastLsnRead} = State) ->
     [{_, CurrentLsn}] = ets:lookup(?LOG_CACHE, current_lsn),
-    lager:info("Processing ~p records~n", [CurrentLsn - LastLsnRead]),
+    %lager:info("Processing ~p records~n", [CurrentLsn - LastLsnRead]),
 
     lists:foldl(
         fun(Lsn, State1) ->
@@ -84,12 +84,12 @@ main(#state{last_lsn_read = LastLsnRead} = State) ->
 
 process_record(
   #log_record{type = transaction_commit,
-              payload = Payload} = Record,
+              payload = Payload} = _Record,
   #state{last_lsn_read = LastLsnRead,
          running_transactions = RunningTransactions,
          latest_object_versions = LatestObjectVersions} = State
 ) ->
-    lager:info("Processing log record ~p~n", [Record]),
+    %lager:info("Processing log record ~p~n", [Record]),
 
     Lsn = LastLsnRead + 1,
     {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,

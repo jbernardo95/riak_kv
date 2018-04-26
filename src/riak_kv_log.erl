@@ -80,7 +80,7 @@ handle_call({append_record, Record}, _From, #state{lsn = Lsn} = State)->
     ets:insert(?LOG_CACHE, {Lsn + 1, Record}),
     ets:insert(?LOG_CACHE, {current_lsn, Lsn + 1}),
 
-    lager:info("Record ~p was appended to the log~n", [Record]),
+    %lager:info("Record ~p was appended to the log~n", [Record]),
 
     NewState = State#state{lsn = Lsn + 1},
     {reply, ok, NewState};
