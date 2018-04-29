@@ -15,9 +15,7 @@
 
 -include("riak_kv_log.hrl").
 
--record(state, {lsn,
-                log,
-                log_cache_table_id}).
+-record(state, {lsn, log}).
 
 
 %%%===================================================================
@@ -59,15 +57,7 @@ init(_Args) ->
     lager:info("Disk log options ~p~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
 
-    % Create ets table to serve as a cache of the log
-    LogCacheEtsTableOptions = [set, named_table, public, {write_concurrency, true}],
-    LogCacheTid = ets:new(?LOG_CACHE, LogCacheEtsTableOptions),
-
-    ets:insert(?LOG_CACHE, {current_lsn, 0}),
-
-    State = #state{lsn = 0,
-                   log = Log,
-                   log_cache_table_id = LogCacheTid},
+    State = #state{lsn = 0, log = Log},
     {ok, State}.
 
 
@@ -77,8 +67,7 @@ handle_call({append_record, Record}, _From, #state{lsn = Lsn} = State)->
     disk_log:log(?LOG, Record),
     disk_log:sync(?LOG),
 
-    ets:insert(?LOG_CACHE, {Lsn + 1, Record}),
-    ets:insert(?LOG_CACHE, {current_lsn, Lsn + 1}),
+    riak_kv_transactions_committer:process_record(Lsn + 1, Record),
 
     lager:info("Record ~p was appended to the log~n", [Record]),
 

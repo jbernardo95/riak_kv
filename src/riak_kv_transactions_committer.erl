@@ -2,7 +2,9 @@
 
 -behaviour(gen_server).
 
--export([start_link/0, print_state/0]).
+-export([start_link/0,
+         process_record/2,
+         print_state/0]).
 
 -export([code_change/3,
          handle_call/3,
@@ -13,7 +15,9 @@
 
 -include("riak_kv_log.hrl").
 
--record(state, {last_lsn_read,
+-define(MESSAGE_QUEUE_LENGTH_THRESHOLD, 100000).
+
+-record(state, {next_lsn,
                 running_transactions,
                 latest_object_versions}).
 
@@ -24,6 +28,9 @@
 start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
+process_record(Lsn, Record) ->
+    gen_server:cast({global, ?MODULE}, {process_record, Lsn, Record}).
+
 print_state() ->
     gen_server:cast({global, ?MODULE}, print_state).
 
@@ -32,8 +39,7 @@ print_state() ->
 %%%===================================================================
 
 init(_Args) ->
-    erlang:send(self(), main),
-    State = #state{last_lsn_read = 0,
+    State = #state{next_lsn = 1,
                    running_transactions = dict:new(),
                    latest_object_versions = dict:new()},
     {ok, State}.
@@ -42,6 +48,11 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
+handle_cast({process_record, Lsn, Record}, #state{next_lsn = Lsn} = State) ->
+    verify_message_queue_length(),
+    NewState = do_process_record(Record, State),
+    {noreply, NewState};
+
 handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
     {noreply, State};
@@ -49,11 +60,6 @@ handle_cast(print_state, State) ->
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
     {noreply, State}.
-
-handle_info(main, State) ->
-    NewState = main(State),
-    erlang:send_after(500, self(), main),
-    {noreply, NewState};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
@@ -67,31 +73,24 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-main(#state{last_lsn_read = LastLsnRead} = State) ->
-    [{_, CurrentLsn}] = ets:lookup(?LOG_CACHE, current_lsn),
-    lager:info("Processing ~p records~n", [CurrentLsn - LastLsnRead]),
+verify_message_queue_length() ->
+    {message_queue_len, MessageQueueLength} = process_info(self(), message_queue_len),
+    if
+        MessageQueueLength > ?MESSAGE_QUEUE_LENGTH_THRESHOLD ->
+            lager:critical("Transactions committer message queue length is past the threshold, currently at ~p~n", [MessageQueueLength]);
+        true ->
+            ok
+    end.
 
-    lists:foldl(
-        fun(Lsn, State1) ->
-            [{_, Record}] = ets:lookup(?LOG_CACHE, Lsn),
-            NewState = process_record(Record, State1),
-            ets:delete(?LOG_CACHE, Lsn),
-            NewState
-        end,
-        State,
-        lists:seq(LastLsnRead + 1, CurrentLsn)
-    ).
-
-process_record(
+do_process_record(
   #log_record{type = transaction_commit,
               payload = Payload} = Record,
-  #state{last_lsn_read = LastLsnRead,
+  #state{next_lsn = Lsn,
          running_transactions = RunningTransactions,
          latest_object_versions = LatestObjectVersions} = State
 ) ->
-    lager:info("Processing log record ~p~n", [Record]),
+    lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
 
-    Lsn = LastLsnRead + 1,
     {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,
 
     Vnode = get_vnode(FirstPut),
@@ -114,12 +113,12 @@ process_record(
             NewLatestObjectVersions = LatestObjectVersions
     end,
 
-    State#state{last_lsn_read = Lsn,
+    State#state{next_lsn = Lsn + 1,
                 running_transactions = NewRunningTransactions,
                 latest_object_versions = NewLatestObjectVersions};
 
-process_record(_Record, #state{last_lsn_read = LastLsnRead} = State) ->
-    State#state{last_lsn_read = LastLsnRead + 1}.
+do_process_record(_Record, #state{next_lsn = Lsn} = State) ->
+    State#state{next_lsn = Lsn + 1}.
 
 commit_transaction(Id, Snapshot, Gets, PutsDict, Client, Lsn, LatestObjectVersions) ->
     {ConflictGets, _} = check_conflicts(Gets, Snapshot, Lsn, LatestObjectVersions),
