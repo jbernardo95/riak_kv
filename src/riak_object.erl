@@ -84,7 +84,7 @@
 -export([new/3, new/4, ensure_robject/1, ancestors/1, reconcile/2, equal/2]).
 -export([increment_vclock/2, increment_vclock/3, prune_vclock/3, vclock_descends/2, all_actors/1]).
 -export([actor_counter/2]).
--export([key/1, get_metadata/1, get_metadatas/1, get_values/1, get_dotted_values/1, get_value/1, get_version/1]).
+-export([key/1, get_metadata/1, get_metadatas/1, get_values/1, get_dotted_values/1, get_value/1, get_version/1, get_tentative_version/1]).
 -export([hash/1, hash/2, approximate_size/2, value_size/1]).
 -export([vclock_encoding_method/0, vclock/1, vclock_header/1, encode_vclock/1, decode_vclock/1]).
 -export([encode_vclock/2, decode_vclock/2]).
@@ -335,12 +335,12 @@ transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) 
                           TransactionId == Id ->
                               if
                                   % If transaction was committed
-                                  % Commit temporary value by adding a version to it
+                                  % Commit tentative value by adding a version to it
                                   Status == committed ->
-                                      NewM = dict:store(<<"version">>, Lsn, M),
+                                      NewM = dict:store(?VERSION, Lsn, M),
                                       {Versions, [C#r_content{metadata = NewM} | Rest]};
 
-                                  % Else discard the temporary value
+                                  % Else discard the tentative value
                                   Status == aborted ->
                                       {Versions, Rest}
                               end;
@@ -724,7 +724,6 @@ get_value(Object=#r_object{}) ->
     [{_M,Value}] = get_contents(Object),
     Value.
 
--spec get_version(riak_object()) -> non_neg_integer().
 get_version(#r_object{} = Object) ->
     Metadata = get_metadata(Object),
     get_version(Metadata);
@@ -737,6 +736,22 @@ get_version({Metadata, _Value}) ->
 
 get_version(Metadata) ->
     case dict:find(?VERSION, Metadata) of
+        {ok, Value} -> Value;
+        error -> -1 
+    end.
+
+get_tentative_version(#r_object{} = Object) ->
+    Metadata = get_metadata(Object),
+    get_tentative_version(Metadata);
+
+get_tentative_version(#r_content{metadata = Metadata}) ->
+    get_tentative_version(Metadata);
+
+get_tentative_version({Metadata, _Value}) ->
+    get_tentative_version(Metadata);
+
+get_tentative_version(Metadata) ->
+    case dict:find(<<"tentative_version">>, Metadata) of
         {ok, Value} -> Value;
         error -> -1 
     end.

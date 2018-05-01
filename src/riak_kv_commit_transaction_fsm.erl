@@ -11,7 +11,6 @@
          code_change/4]).
 -export([prepare/2,
          execute/2,
-         wait_for_vnode/2,
          wait_for_transactions_committer/2,
          respond_to_client/2]).
 
@@ -22,7 +21,6 @@
                 puts,
                 preflist_puts, 
                 timerref,
-                vnode_responses,
                 status,
                 lsn,
                 timeout}).
@@ -59,7 +57,6 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        puts = Puts,
                        preflist_puts = undefined,
                        timerref = undefined,
-                       vnode_responses = 0,
                        status = undefined,
                        lsn = undefined,
                        timeout = false},
@@ -97,33 +94,13 @@ execute(
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
-    {next_state, wait_for_vnode, NewStateData}.
-
-wait_for_vnode(
-  {ok, _Idx, _Id},
-  #state{preflist_puts = PreflistPuts,
-         vnode_responses = VnodeResponses} = StateData
-) ->
-    NewVnodeResponses = VnodeResponses + 1,
-    NewStateData = StateData#state{vnode_responses = NewVnodeResponses},
-    NVnodes = dict:size(PreflistPuts),
-    if
-        NewVnodeResponses == NVnodes ->
-            {next_state, wait_for_transactions_committer, NewStateData};
-        true ->
-            {next_state, wait_for_vnode, NewStateData}
-    end;
-
-wait_for_vnode(timeout, StateData) ->
-    NewStateData = StateData#state{timeout = true},
-    {next_state, respond_to_client, NewStateData, 0}.
+    {next_state, wait_for_transactions_committer, NewStateData}.
 
 wait_for_transactions_committer(
   {transaction_commit_status, Id, Status, Lsn},
   #state{id = Id} = StateData
 ) ->
-    NewStateData = StateData#state{status = Status,
-                                   lsn = Lsn},
+    NewStateData = StateData#state{status = Status, lsn = Lsn},
     {next_state, respond_to_client, NewStateData, 0};
 
 wait_for_transactions_committer(timeout, StateData) ->

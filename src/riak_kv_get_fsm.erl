@@ -318,7 +318,7 @@ preflist_for_tracing(Preflist) ->
      end || {Idx, Nd} <- lists:sublist(Preflist, 4)].
 
 %% @private
-waiting_vnode_r({r, VnodeResult, Idx, _ReqId, Snapshot},
+waiting_vnode_r({r, VnodeResult, Idx, _ReqId},
                 StateData = #state{get_core = GetCore, trace=Trace}) ->
     case Trace of
         true ->
@@ -328,7 +328,7 @@ waiting_vnode_r({r, VnodeResult, Idx, _ReqId, Snapshot},
         _ ->
             ok
     end,
-    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, Snapshot, GetCore),
+    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     case riak_kv_get_core:enough(UpdGetCore) of
         true ->
             {Reply, UpdGetCore2} = riak_kv_get_core:response(UpdGetCore),
@@ -347,7 +347,7 @@ waiting_vnode_r(request_timeout, StateData = #state{trace=Trace}) ->
     finalize(S2).
 
 %% @private
-waiting_read_repair({r, VnodeResult, Idx, _ReqId, Snapshot},
+waiting_read_repair({r, VnodeResult, Idx, _ReqId},
                     StateData = #state{get_core = GetCore, trace=Trace}) ->
     case Trace of
         true ->
@@ -358,7 +358,7 @@ waiting_read_repair({r, VnodeResult, Idx, _ReqId, Snapshot},
         _ -> 
             ok
     end,
-    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, Snapshot, GetCore),
+    UpdGetCore = riak_kv_get_core:add_result(Idx, VnodeResult, GetCore),
     maybe_finalize(StateData#state{get_core = UpdGetCore});
 waiting_read_repair(request_timeout, StateData = #state{trace=Trace}) ->
     ?DTRACE(Trace, ?C_GET_FSM_WAITING_RR_TIMEOUT, [-2],

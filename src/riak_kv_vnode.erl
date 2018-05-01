@@ -144,8 +144,7 @@
                 md_cache_size :: pos_integer(),
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
-                update_hook = riak_kv_noop_update_hook :: update_hook(),
-                snapshot :: non_neg_integer()}). % The latest log position the vnode is aware of
+                update_hook = riak_kv_noop_update_hook :: update_hook()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -519,8 +518,7 @@ init([Index]) ->
                            mrjobs=dict:new(),
                            md_cache=MDCache,
                            md_cache_size=MDCacheSize,
-                           update_hook=update_hook(),
-                           snapshot = 0},
+                           update_hook=update_hook()},
             try_set_vnode_lock_limit(Index),
             case AsyncFolding of
                 true ->
@@ -1379,9 +1377,6 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     Record = riak_kv_log:new_log_record(transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
     riak_kv_log:append_record(Record),
 
-    Reply = {ok, Idx, Id},
-    riak_core_vnode:reply(Sender, Reply),
-
     NewState.
 
 handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
@@ -1396,15 +1391,13 @@ handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
     Metadata1 = dict:store(<<"transaction_status">>, Status, Metadata2),
     Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
 
-    NewState = State#state{snapshot = Lsn},
-
     % Commit or discard each temporary put
     lists:foldl(fun({Bucket, Key} = Bkey, State1) ->
                         Object1 = riak_object:new(Bucket, Key, nil),
                         Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
                         {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
                         State2
-                end, NewState, Puts).
+                end, State, Puts).
 
 %% @private
 do_put(Request, State) ->
@@ -1811,8 +1804,7 @@ put_merge(true, LWW, CurObj, UpdObj, {_NewEpoch, VId}, StartTime) ->
 do_get(_Sender, BKey, ReqID,
        #state{idx = Idx,
               mod = Mod,
-              modstate = ModState,
-              snapshot = Snapshot} = State) ->
+              modstate = ModState} = State) ->
     StartTS = os:timestamp(),
     {Retval, ModState1} = do_get_term(BKey, Mod, ModState),
     State1 = State#state{modstate=ModState1},
@@ -1831,7 +1823,7 @@ do_get(_Sender, BKey, ReqID,
                 {Retval, State1}
         end,
     update_vnode_stats(vnode_get, Idx, StartTS),
-    {reply, {r, Retval1, Idx, ReqID, Snapshot}, State3}.
+    {reply, {r, Retval1, Idx, ReqID}, State3}.
 
 %% @private
 -spec do_get_term({binary(), binary()}, atom(), tuple()) ->

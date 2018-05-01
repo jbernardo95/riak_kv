@@ -85,12 +85,11 @@ handle_call(
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            Reply = get_reply({error, transaction_aborted}),
+            Reply = {error, transaction_aborted},
             NewState = clean_transaction_state(NewState1),
             {reply, Reply, NewState};
         true ->
-            Reply = get_reply(GetResult),
-            {reply, Reply, NewState1}
+            {reply, GetResult, NewState1}
     end;
 
 % Single get 
@@ -98,17 +97,25 @@ handle_call({get, Key}, _From, State) ->
     Bkey = {?DEFAULT_BUCKET, Key},
     GetResult = do_get(Bkey, State, false),
 
-    Reply = get_reply(GetResult),
     NewState = maybe_update_clock(GetResult, State),
-    {reply, Reply, NewState};
+    {reply, GetResult, NewState};
 
 % Transactional put 
 handle_call(
   {put, Key, Value},
   _From,
-  #state{in_transaction = true, id = Id, puts = Puts} = State
+  #state{clock = Clock,
+         in_transaction = true,
+         id = Id,
+         snapshot = Snapshot,
+         puts = Puts} = State
  ) ->
-    Object = create_object(?DEFAULT_BUCKET, Key, Value, Id),
+    Object = case Snapshot of
+                 undefined ->
+                     create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1);
+                 _ ->
+                     create_object(?DEFAULT_BUCKET, Key, Value, Id, Snapshot + 1)
+             end,
     Bkey = riak_object:bkey(Object),
     NewPuts = dict:store(Bkey, Object, Puts),
     NewState = State#state{puts = NewPuts},
@@ -122,7 +129,7 @@ handle_call(
   #state{client = Client, clock = Clock} = State
  ) ->
     Id = erlang:phash2({self(), os:timestamp()}),
-    Object = create_object(?DEFAULT_BUCKET, Key, Value, Id),
+    Object = create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1),
     {Status, Lsn} = Client:commit_transaction(Id, Clock, [], [Object]),
 
     Reply = commit_reply(Status),
@@ -196,16 +203,19 @@ do_get(
     do_get_remote(Client, Bkey, Clock, ReadOnly);
 
 % Transactional get
-% In case the snapshot is not set get the latest version of an object
 do_get(
   Bkey,
   #state{client = Client,
          in_transaction = true,
          snapshot = undefined,
-         clock = Clock},
+         clock = Clock,
+         puts = Puts},
   _ReadOnly
 ) ->
-    do_get_remote(Client, Bkey, Clock, false);
+    case do_get_local(Bkey, Puts) of
+        {ok, Object} -> {ok, Object};
+        _ -> do_get_remote(Client, Bkey, Clock, false)
+    end;
 
 do_get(
   Bkey,
@@ -216,7 +226,7 @@ do_get(
   ReadOnly
 ) ->
     case do_get_local(Bkey, Puts) of
-        {ok, Object} -> {ok, Object, Snapshot};
+        {ok, Object} -> {ok, Object};
         _ -> do_get_remote(Client, Bkey, Snapshot, ReadOnly)
     end.
 
@@ -228,100 +238,129 @@ do_get_local(Bkey, Puts) ->
 
 do_get_remote(Client, {Bucket, Key}, Snapshot, ReadOnly) ->
     case Client:get(Bucket, Key) of
-        {ok, Object, VnodeSnapshot} ->
-            if
-                Snapshot > VnodeSnapshot ->
-                    % TODO wait for node to be up to date
-                    {error, node_snapshot_behind_local_snapshot};
-                true ->
-                    select_object_contents(Object, VnodeSnapshot, Snapshot, ReadOnly)
-            end;
-        {error, _, _} = Error ->
+        {ok, Object} ->
+            select_object_content(Object, Snapshot, ReadOnly);
+        {error, _} = Error ->
             Error
     end.
 
-select_object_contents(Object, VnodeSnapshot, Snapshot, ReadOnly) ->
+% Selects latest r_content taking in account the snapshot for tentative r_content 
+% 
+% For an object with the following content: 1, 2, 5, 8, t10, t15 a client with snapshot
+% 12 will get an object with content t10
+%
+% For an object with the following content: 1, 2, 5, 8, 10 a client with snapshot 9
+% will get an object with content 10
+select_object_content(Object, Snapshot, false = _ReadOnly) ->
+    SelectFun = fun(Content, Acc) ->
+                        ContentVersion = riak_object:get_version(Content),
+                        if
+                            Acc == nil -> Content;
+                            Acc /= nil ->
+                                AccVersion = case riak_object:get_version(Acc) of
+                                                 -1 -> riak_object:get_tentative_version(Acc); 
+                                                 Version -> Version
+                                             end,
+                                if
+                                    ContentVersion == -1 -> % Tentative content
+                                        ContentVersion1 = riak_object:get_tentative_version(Content),
+                                        if
+                                            ContentVersion1 > AccVersion andalso ContentVersion1 =< Snapshot -> Content;
+                                            true -> Acc
+                                        end;
+
+                                    true -> % Committed content
+                                        if
+                                            ContentVersion > AccVersion -> Content;
+                                            true -> Acc
+                                        end
+                                end
+                        end
+                end,
+    do_select_object_content(Object, SelectFun);
+
+% Selects the r_content consistent with the given snapshot
+% 
+% For an object with the following content: 1, 2, 5, 8, t10, t15 a client with snapshot
+% 12 will get an object with content t10
+%
+% For an object with the following content: 1, 2, 5, 8, 10 a client with snapshot 9
+% will get an object with content 8
+select_object_content(Object, Snapshot, true = _ReadOnly) ->
+    SelectFun = fun(Content, Acc) ->
+                        ContentVersion = case riak_object:get_version(Content) of
+                                             -1 -> riak_object:get_tentative_version(Content); 
+                                             Version1 -> Version1
+                                         end,
+                        if
+                            Acc == nil ->
+                                if
+                                    ContentVersion =< Snapshot -> Content;
+                                    true -> Acc
+                                end;
+                            Acc /= nil ->
+                                AccVersion = case riak_object:get_version(Acc) of
+                                                 -1 -> riak_object:get_tentative_version(Acc); 
+                                                 Version2 -> Version2
+                                             end,
+                                if
+                                    ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
+                                    true -> Acc
+                                end
+                        end
+                end,
+    do_select_object_content(Object, SelectFun).
+
+do_select_object_content(Object, SelectFun) ->
     Contents = riak_object:get_contents(Object),
-    SelectedContent = do_select_object_contents(Contents, VnodeSnapshot, Snapshot, ReadOnly),
+    SelectedContent = lists:foldl(SelectFun, nil, Contents),
     if
         SelectedContent == nil ->
-            {error, garbage_collected_from_vnode};
+            {error, not_found};
         true ->
-            case riak_object:get_version(SelectedContent) of
-                -1 ->
-                    {error, not_found, VnodeSnapshot};
-                _ ->
+            Version = riak_object:get_version(SelectedContent),
+            case Version of
+                -1 -> % Selected content has not yet been committed
+                    {error, try_again};
+                _ -> % Selected content has been committed
                     NewObject = riak_object:set_contents(Object, [SelectedContent]),
-                    {ok, NewObject, VnodeSnapshot}
+                    {ok, NewObject}
             end
     end.
 
-do_select_object_contents([], VnodeSnapshot, _Snapshot, _ReadOnly) ->
-    {error, not_found, VnodeSnapshot};
-
-% Read-only transaction
-do_select_object_contents(Contents, _VnodeSnapshot, Snapshot, true) ->
-    % Select content consistent with the snapshot
-    FoldlFun = fun(Content, Acc) ->
-                       ContentVersion = riak_object:get_version(Content),
-                       if
-                           Acc == nil ->
-                               if
-                                   ContentVersion =< Snapshot -> Content;
-                                   true -> Acc
-                               end;
-                           Acc /= nil ->
-                               AccVersion = riak_object:get_version(Acc),
-                               if
-                                   ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
-                                   true -> Acc
-                               end
-                        end
-               end,
-    lists:foldl(FoldlFun, nil, Contents);
-
-% Read-write transaction
-do_select_object_contents([Acc0 | _] = Contents, _VnodeSnapshot, _Snapshot, false) ->
-    % Select content with the highest version 
-    FoldlFun = fun(Content, Acc) ->
-                       ContentVersion = riak_object:get_version(Content),
-                       AccVersion = riak_object:get_version(Acc),
-                       if
-                           ContentVersion > AccVersion -> Content;
-                           true -> Acc 
-                       end
-               end,
-    lists:foldl(FoldlFun, Acc0, Contents).
-
-maybe_set_snapshot({_, _, VnodeSnapshot}, #state{snapshot = undefined} = State)
-  when is_integer(VnodeSnapshot), VnodeSnapshot /= -1 ->
-    State#state{snapshot = VnodeSnapshot};
+maybe_set_snapshot({ok, Object}, #state{snapshot = undefined} = State) ->
+    Version = riak_object:get_version(Object),
+    if
+        Version /= -1 -> State#state{snapshot = Version};
+        true -> State
+    end;
 maybe_set_snapshot(_GetResult, State) -> State.
 
-maybe_record_get({ok, Object, _VnodeSnapshot}, #state{gets = Gets} = State) ->
+maybe_record_get({ok, Object}, #state{gets = Gets} = State) ->
     NewGets = dict:store(riak_object:bkey(Object), ok, Gets),
     State#state{gets = NewGets};
 maybe_record_get(_GetResult, State) -> State.
 
-maybe_update_clock({_, _, VnodeSnapshot}, State)
-  when is_integer(VnodeSnapshot), VnodeSnapshot /= -1 ->
-    State#state{clock = VnodeSnapshot};
+maybe_update_clock({ok, Object}, State) ->
+    Version = riak_object:get_version(Object),
+    if
+        Version /= -1 -> State#state{clock = Version};
+        true -> State
+    end;
 maybe_update_clock(_GetResult, State) -> State.
 
-check_get_conflict({ok, Object, _VnodeSnapshot}, Snapshot) ->
+check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_version(Object) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
-
-get_reply({ok, Object, _VnodeSnapshot}) -> {ok, Object};
-get_reply(GetResult) -> GetResult.
 
 commit_reply(committed) -> ok;
 commit_reply(aborted) -> {error, aborted};
 commit_reply(_Status) -> error.
 
-create_object(Bucket, Key, Value, Id) ->
+create_object(Bucket, Key, Value, Id, TentativeVersion) ->
     Object = riak_object:new(Bucket, Key, nil),
-    Metadata = dict:store(<<"transaction_id">>, Id, dict:new()),
+    Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
+    Metadata = dict:store(<<"tentative_version">>, TentativeVersion, Metadata1),
     riak_object:set_contents(Object, [{Metadata, Value}]).
 
 do_commit_transaction(Id, undefined, Gets, Puts, #state{clock = Clock} = State) ->

@@ -20,7 +20,7 @@
 %%
 %% -------------------------------------------------------------------
 -module(riak_kv_get_core).
--export([init/8, add_result/4, result_shortcode/1, enough/1, response/1,
+-export([init/8, add_result/3, result_shortcode/1, enough/1, response/1,
          has_all_results/1, final_action/1, info/1]).
 -export_type([getcore/0, result/0, reply/0, final_action/0]).
 
@@ -56,8 +56,7 @@
                   num_notfound = 0 :: non_neg_integer(),
                   num_deleted = 0 :: non_neg_integer(),
                   num_fail = 0 :: non_neg_integer(),
-                  idx_type :: idx_type(),
-                  snapshot :: non_neg_integer()}).
+                  idx_type :: idx_type()}).
 -opaque getcore() :: #getcore{}.
 
 %% ====================================================================
@@ -77,28 +76,25 @@ init(N, R, PR, FailThreshold, NotFoundOk, AllowMult, DeletedVClock, IdxType) ->
              notfound_ok = NotFoundOk,
              allow_mult = AllowMult,
              deletedvclock = DeletedVClock,
-             idx_type = IdxType,
-             snapshot = -1}.
+             idx_type = IdxType}.
 
 %% Add a result for a vnode index
--spec add_result(non_neg_integer(), result(), non_neg_integer(), getcore()) -> getcore().
-add_result(Idx, {ok, RObj} = Result, Snapshot, GetCore) ->
+-spec add_result(non_neg_integer(), result(), getcore()) -> getcore().
+add_result(Idx, {ok, RObj} = Result, GetCore) ->
     Dels = case riak_kv_util:is_x_deleted(RObj) of
         true ->  1;
         false -> 0
     end,
     num_pr(GetCore#getcore{
             results = [{Idx, Result}|GetCore#getcore.results],
-            snapshot = Snapshot,
             merged = undefined,
             num_ok = GetCore#getcore.num_ok + 1,
             num_deleted = GetCore#getcore.num_deleted + Dels}, Idx);
-add_result(Idx, {error, notfound} = Result, Snapshot, GetCore) ->
+add_result(Idx, {error, notfound} = Result, GetCore) ->
     case GetCore#getcore.notfound_ok of
         true ->
             num_pr(GetCore#getcore{
                     results = [{Idx, Result}|GetCore#getcore.results],
-                    snapshot = Snapshot,
                     merged = undefined,
                     num_ok = GetCore#getcore.num_ok + 1}, Idx);
         _ ->
@@ -107,10 +103,9 @@ add_result(Idx, {error, notfound} = Result, Snapshot, GetCore) ->
                 merged = undefined,
                 num_notfound = GetCore#getcore.num_notfound + 1}
     end;
-add_result(Idx, {error, _Reason} = Result, Snapshot, GetCore) ->
+add_result(Idx, {error, _Reason} = Result, GetCore) ->
     GetCore#getcore{
         results = [{Idx, Result}|GetCore#getcore.results],
-        snapshot = Snapshot,
         merged = undefined,
         num_fail = GetCore#getcore.num_fail + 1}.
 
@@ -142,41 +137,40 @@ response(#getcore{r = R, num_ok = NumOK, pr= PR, num_pok = NumPOK} = GetCore)
         when NumOK >= R andalso NumPOK >= PR ->
     #getcore{results = Results,
              allow_mult=AllowMult,
-             deletedvclock = DeletedVClock,
-             snapshot = Snapshot} = GetCore,
+             deletedvclock = DeletedVClock} = GetCore,
     {ObjState, MObj} = Merged = merge(Results, AllowMult),
     Reply = case ObjState of
         ok ->
-            {ok, MObj, Snapshot};
+            {ok, MObj};
         tombstone when DeletedVClock ->
-            {error, {deleted, riak_object:vclock(MObj)}, Snapshot};
+            {error, {deleted, riak_object:vclock(MObj)}};
         _ -> % tombstone or notfound or expired
-            {error, notfound, Snapshot}
+            {error, notfound}
     end,
     {Reply, GetCore#getcore{merged = Merged}};
 %% everything was either a tombstone or a notfound
 response(#getcore{num_notfound = NumNotFound, num_ok = NumOK,
-        num_deleted = NumDel, num_fail = NumFail, snapshot = Snapshot} = GetCore)
+        num_deleted = NumDel, num_fail = NumFail} = GetCore)
         when NumNotFound + NumDel > 0, NumOK - NumDel == 0, NumFail == 0  ->
-    {{error, notfound, Snapshot}, GetCore};
+    {{error, notfound}, GetCore};
 %% We've satisfied R, but not PR
-response(#getcore{r = R, pr = PR, num_ok = NumR, num_pok = NumPR, snapshot = Snapshot} = GetCore)
+response(#getcore{r = R, pr = PR, num_ok = NumR, num_pok = NumPR} = GetCore)
       when PR > 0, NumPR < PR, NumR >= R ->
-    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}, Snapshot}, GetCore);
+    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}}, GetCore);
 %% PR and/or R are unsatisfied, but PR is more restrictive
-response(#getcore{r = R, num_pok = NumPR, pr = PR, snapshot = Snapshot} = GetCore) when PR >= R ->
-    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}, Snapshot}, GetCore);
+response(#getcore{r = R, num_pok = NumPR, pr = PR} = GetCore) when PR >= R ->
+    check_overload({error, {pr_val_unsatisfied, PR,  NumPR}}, GetCore);
 %% PR and/or R are unsatisfied, but R is more restrictive
-response(#getcore{r = R, num_ok = NumR, snapshot = Snapshot} = GetCore) ->
-    check_overload({error, {r_val_unsatisfied, R,  NumR}, Snapshot}, GetCore).
+response(#getcore{r = R, num_ok = NumR} = GetCore) ->
+    check_overload({error, {r_val_unsatisfied, R,  NumR}}, GetCore).
 
 %% Check for vnode overload
-check_overload(Response, GetCore = #getcore{results=Results, snapshot = Snapshot}) ->
+check_overload(Response, GetCore = #getcore{results=Results}) ->
     case [x || {_,{error, overload}} <- Results] of
         [] ->
             {Response, GetCore};
         _->
-            {{error, overload, Snapshot}, GetCore}
+            {{error, overload}, GetCore}
     end.
 
 %% Check if all expected results have been added
