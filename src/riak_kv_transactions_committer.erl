@@ -84,12 +84,12 @@ verify_message_queue_length() ->
 
 do_process_record(
   #log_record{type = transaction_commit,
-              payload = Payload} = Record,
+              payload = Payload} = _Record,
   #state{next_lsn = Lsn,
          running_transactions = RunningTransactions,
          latest_object_versions = LatestObjectVersions} = State
 ) ->
-    lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
+    %lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
 
     {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,
 

@@ -1357,8 +1357,8 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+handle_commit_transaction_request(Req, Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     % Save puts as temporary
     Puts1 = riak_kv_requests:get_puts(Req),
@@ -1379,8 +1379,8 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
 
     NewState.
 
-handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling transaction status request ~p at vnode ~p~n", [Req, Idx]),
+handle_transaction_status_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling transaction status request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
     Status = riak_kv_requests:get_status(Req),

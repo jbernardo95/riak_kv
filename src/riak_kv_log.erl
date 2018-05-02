@@ -69,7 +69,7 @@ handle_call({append_record, Record}, _From, #state{lsn = Lsn} = State)->
 
     riak_kv_transactions_committer:process_record(Lsn + 1, Record),
 
-    lager:info("Record ~p was appended to the log~n", [Record]),
+    %lager:info("Record ~p was appended to the log~n", [Record]),
 
     NewState = State#state{lsn = Lsn + 1},
     {reply, ok, NewState};
