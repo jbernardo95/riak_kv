@@ -22,8 +22,7 @@
 -module(riak_kv_requests).
 
 %% API
--export([new_commit_transaction_request/5,
-         new_transaction_status_request/4,
+-export([new_commit_transaction_request/3,
          new_put_request/5,
          new_get_request/2,
          new_w1c_put_request/3,
@@ -51,17 +50,12 @@
          get_start_time/1,
          get_options/1,
          get_id/1,
-         get_snapshot/1,
-         get_gets/1,
          get_puts/1,
-         get_n_vnodes/1,
-         get_status/1,
          get_lsn/1,
          remove_option/2,
          request_type/1]).
 
 -export_type([commit_transaction_request/0,
-              transaction_status_request/0,
               put_request/0,
               get_request/0,
               w1c_put_request/0,
@@ -91,17 +85,8 @@
 
 -record(riak_kv_commit_transaction_req_v1, {
     id :: non_neg_integer(),
-    snapshot :: non_neg_integer(),
-    gets :: [bucket_key()],
-    puts :: [bucket_key()],
-    n_vnodes :: non_neg_integer()
-}).
-
--record(riak_kv_transaction_status_req_v1, {
-    id :: non_neg_integer(),
-    status :: atom(),
-    lsn :: non_neg_integer(),
-    puts :: [bucket_key()]
+    puts :: [object()],
+    lsn :: non_neg_integer()
 }).
 
 -record(riak_kv_put_req_v1, {
@@ -175,7 +160,6 @@
 
 
 -opaque commit_transaction_request() :: #riak_kv_commit_transaction_req_v1{}.
--opaque transaction_status_request() :: #riak_kv_transaction_status_req_v1{}.
 -opaque put_request() :: #riak_kv_put_req_v1{}.
 -opaque get_request() :: #riak_kv_get_req_v1{}.
 -opaque w1c_put_request() :: #riak_kv_w1c_put_req_v1{}.
@@ -190,7 +174,6 @@
 
 
 -type request() :: commit_transaction_request()
-                 | transaction_status_request()
                  | put_request()
                  | get_request()
                  | w1c_put_request()
@@ -204,7 +187,6 @@
                  | vclock_request().
 
 -type request_type() :: kv_commit_transaction_request
-                      | kv_transaction_status_request
                       | kv_put_request
                       | kv_get_request
                       | kv_w1c_put_request
@@ -220,7 +202,6 @@
 
 -spec request_type(request()) -> request_type().
 request_type(#riak_kv_commit_transaction_req_v1{}) -> kv_commit_transaction_request;
-request_type(#riak_kv_transaction_status_req_v1{}) -> kv_transaction_status_request;
 request_type(#riak_kv_put_req_v1{})                -> kv_put_request;
 request_type(#riak_kv_get_req_v1{})                -> kv_get_request;
 request_type(#riak_kv_w1c_put_req_v1{})            -> kv_w1c_put_request;
@@ -237,26 +218,12 @@ request_type(#riak_kv_vclock_req_v1{})             -> kv_vclock_request;
 request_type(_)                                    -> unknown.
 
 -spec new_commit_transaction_request(non_neg_integer(),
-                                     non_neg_integer(),
-                                     [bucket_key()],
-                                     [bucket_key()],
+                                     [object()],
                                      non_neg_integer()) -> commit_transaction_request().
-new_commit_transaction_request(Id, Snapshot, Gets, Puts, NVnodes) ->
+new_commit_transaction_request(Id, Puts, Lsn) ->
     #riak_kv_commit_transaction_req_v1{id = Id,
-                                       snapshot = Snapshot,
-                                       gets = Gets,
                                        puts = Puts,
-                                       n_vnodes = NVnodes}.
-
--spec new_transaction_status_request(non_neg_integer(),
-                                     atom(),
-                                     non_neg_integer(),
-                                     [object()]) -> transaction_status_request().
-new_transaction_status_request(Id, Status, Lsn, Puts) ->
-    #riak_kv_transaction_status_req_v1{id = Id,
-                                       status = Status,
-                                       lsn = Lsn,
-                                       puts = Puts}.
+                                       lsn = Lsn}.
 
 -spec new_put_request(bucket_key(),
                       object(),
@@ -419,30 +386,12 @@ get_options(#riak_kv_put_req_v1{options = Options}) ->
     Options.
 
 get_id(#riak_kv_commit_transaction_req_v1{id = Id}) ->
-    Id;
-
-get_id(#riak_kv_transaction_status_req_v1{id = Id}) ->
     Id.
 
-get_snapshot(#riak_kv_commit_transaction_req_v1{snapshot = Snapshot}) ->
-    Snapshot.
-
-get_gets(#riak_kv_commit_transaction_req_v1{gets = Gets}) ->
-    Gets.
-
 get_puts(#riak_kv_commit_transaction_req_v1{puts = Puts}) ->
-    Puts;
-
-get_puts(#riak_kv_transaction_status_req_v1{puts = Puts}) ->
     Puts.
 
-get_n_vnodes(#riak_kv_commit_transaction_req_v1{n_vnodes = NVnodes}) ->
-    NVnodes.
-
-get_status(#riak_kv_transaction_status_req_v1{status = Status}) ->
-    Status.
-
-get_lsn(#riak_kv_transaction_status_req_v1{lsn = Lsn}) ->
+get_lsn(#riak_kv_commit_transaction_req_v1{lsn = Lsn}) ->
     Lsn.
 
 remove_option(#riak_kv_put_req_v1{options = Options}=Req, Option) ->

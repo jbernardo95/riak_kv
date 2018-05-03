@@ -11,7 +11,6 @@
          code_change/4]).
 -export([prepare/2,
          execute/2,
-         wait_for_transactions_committer/2,
          respond_to_client/2]).
 
 -record(state, {from,
@@ -19,13 +18,8 @@
                 snapshot,
                 gets,
                 puts,
-                preflist_puts, 
-                timerref,
-                status,
-                lsn,
-                timeout}).
-
--define(DEFAULT_TIMEOUT, 60000).
+                record,
+                reply}).
 
 %% ===================================================================
 %% Public API
@@ -55,68 +49,23 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        snapshot = Snapshot,
                        gets = Gets,
                        puts = Puts,
-                       preflist_puts = undefined,
-                       timerref = undefined,
-                       status = undefined,
-                       lsn = undefined,
-                       timeout = false},
+                       record = undefined,
+                       reply = undefined},
     {ok, prepare, StateData, 0}.
 
-prepare(timeout, #state{puts = Puts} = StateData) ->
-    FoldFun = fun(Object, PreflistPuts1) ->
-                      Bkey = riak_object:bkey(Object),
-                      DocIdx = riak_core_util:chash_key(Bkey),
-                      [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
-
-                      case dict:find(Vnode, PreflistPuts1) of
-                          {ok, Puts1} -> dict:store(Vnode, [Object | Puts1], PreflistPuts1);
-                          error -> dict:store(Vnode, [Object], PreflistPuts1)
-                      end
-              end,
-    PreflistPuts = lists:foldl(FoldFun, dict:new(), Puts),
-
-    NewStateData = StateData#state{preflist_puts = PreflistPuts},
+prepare(timeout, #state{id = Id, snapshot = Snapshot, gets = Gets, puts = Puts} = StateData) ->
+    Record = riak_kv_log:new_log_record(transaction_commit, {Id, Snapshot, Gets, Puts}),
+    NewStateData = StateData#state{record = Record},
     {next_state, execute, NewStateData, 0}.
 
-execute(
-  timeout,
-  #state{id = Id,
-         snapshot = Snapshot,
-         gets = Gets,
-         preflist_puts = PreflistPuts} = StateData
-) ->
-    Vnodes = dict:fetch_keys(PreflistPuts),
-    NVnodes = length(Vnodes),
-    lists:foreach(fun(Vnode) ->
-                          Puts = dict:fetch(Vnode, PreflistPuts),
-                          riak_kv_vnode:commit_transaction([Vnode], Id, Snapshot, Gets, Puts, NVnodes)
-                  end, Vnodes),
-
-    TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
-    NewStateData = StateData#state{timerref = TimerRef},
-    {next_state, wait_for_transactions_committer, NewStateData}.
-
-wait_for_transactions_committer(
-  {transaction_commit_status, Id, Status, Lsn},
-  #state{id = Id} = StateData
-) ->
-    NewStateData = StateData#state{status = Status, lsn = Lsn},
-    {next_state, respond_to_client, NewStateData, 0};
-
-wait_for_transactions_committer(timeout, StateData) ->
-    NewStateData = StateData#state{timeout = true},
+execute(timeout, #state{record = Record} = StateData) ->
+    Reply = riak_kv_log:append_record(Record),
+    NewStateData = StateData#state{reply = Reply},
     {next_state, respond_to_client, NewStateData, 0}.
 
-respond_to_client(timeout,
-                  #state{from = {raw, ReqId, Pid},
-                         status = Status,
-                         lsn = Lsn,
-                         timeout = Timeout} = StateData) ->
-    ClientReply = if
-                      Timeout -> Timeout;
-                      true -> {Status, Lsn}
-                  end,
-    FsmReply = {ReqId, ClientReply},
+respond_to_client(timeout, #state{from = {raw, ReqId, Pid},
+                                  reply = Reply} = StateData) ->
+    FsmReply = {ReqId, Reply},
     erlang:send(Pid, FsmReply),
     {stop, normal, StateData}.
 
@@ -135,13 +84,3 @@ terminate(Reason, _StateName, _State) ->
     Reason.
 
 code_change(_OldVsn, StateName, State, _Extra) -> {ok, StateName, State}.
-
-
-%% ====================================================================
-%% Internal functions
-%% ====================================================================
-
-schedule_timeout(infinity) ->
-    undefined;
-schedule_timeout(Timeout) ->
-    erlang:send_after(Timeout, self(), timeout).

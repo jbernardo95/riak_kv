@@ -300,25 +300,8 @@ merge_write_once(OldObject, NewObject) ->
             NewObject
     end.
 
-append_merge_contents(
-  #r_object{contents = OldContents},
-  #r_object{contents = NewContents}
-) ->
-        [NewContent] = NewContents,
-        [NewContent | OldContents].
-
-transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) ->
-    Metadata = get_metadata(NewObject),
-    Id = dict:fetch(<<"transaction_id">>, Metadata),
-    Status = dict:fetch(<<"transaction_status">>, Metadata),
-    Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
-
-    MaximumObjectVersions = case Status of
-                                committed ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions) - 1;
-                                aborted ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions)
-                            end,
+merge_contents(#r_object{contents = OldContents}, #r_object{contents = NewContents}, false) ->
+    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
 
     % Sort OldContents in descending order
     SortFun = fun(C1, C2) ->
@@ -328,51 +311,8 @@ transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) 
               end,
     SortedContents = lists:sort(SortFun, OldContents),
 
-    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
-                      TransactionId = dict:fetch(<<"transaction_id">>, M),
-                      if
-                          % Involved in the transaction
-                          TransactionId == Id ->
-                              if
-                                  % If transaction was committed
-                                  % Commit tentative value by adding a version to it
-                                  Status == committed ->
-                                      NewM = dict:store(?VERSION, Lsn, M),
-                                      {Versions, [C#r_content{metadata = NewM} | Rest]};
-
-                                  % Else discard the tentative value
-                                  Status == aborted ->
-                                      {Versions, Rest}
-                              end;
-
-                          % Not involved in the transaction
-                          true ->
-                              case get_version(C) of
-                                  % Temporary value
-                                  -1 ->
-                                      {Versions, [C | Rest]};
-                                  % Committed value
-                                  _ ->
-                                      if
-                                          Versions < MaximumObjectVersions ->
-                                              {Versions + 1, [C | Rest]};
-                                          true ->
-                                              {Versions + 1, Rest}
-                                      end
-                              end
-                      end
-              end,
-    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, SortedContents),
-    MergedContents.
-
-merge_contents(OldObject, NewObject, false) ->
-    Metadata = get_metadata(NewObject),
-
-    Result = case dict:find(<<"transaction_status">>, Metadata) of
-                 {ok, _} -> transaction_status_merge_contents(OldObject, NewObject);
-                 error -> append_merge_contents(OldObject, NewObject) 
-             end,
-
+    [NewContent] = NewContents,
+    Result = lists:sublist([NewContent | SortedContents], MaximumObjectVersions),
     {undefined, Result};
 
 %% @doc Merge the r_objects contents by converting the inner dict to

@@ -17,9 +17,7 @@
 
 -define(MESSAGE_QUEUE_LENGTH_THRESHOLD, 100000).
 
--record(state, {next_lsn,
-                running_transactions,
-                latest_object_versions}).
+-record(state, {next_lsn}).
 
 %%%===================================================================
 %%% API
@@ -39,9 +37,7 @@ print_state() ->
 %%%===================================================================
 
 init(_Args) ->
-    State = #state{next_lsn = 1,
-                   running_transactions = dict:new(),
-                   latest_object_versions = dict:new()},
+    State = #state{next_lsn = 1},
     {ok, State}.
 
 handle_call(Request, _From, State) ->
@@ -84,90 +80,38 @@ verify_message_queue_length() ->
 
 do_process_record(
   #log_record{type = transaction_commit,
-              payload = Payload} = Record,
-  #state{next_lsn = Lsn,
-         running_transactions = RunningTransactions,
-         latest_object_versions = LatestObjectVersions} = State
+              payload = {Id, _Snapshot, _Gets, Puts}} = Record,
+  #state{next_lsn = Lsn} = State
 ) ->
     lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
 
-    {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,
+    commit_transaction(Id, Puts, Lsn),
 
-    Vnode = get_vnode(FirstPut),
-    NewRunningTransactions1 = case dict:find(Id, RunningTransactions) of
-                                 {ok, {Count1, Puts1}} ->
-                                     Puts2 = dict:store(Vnode, PayloadPuts, Puts1),
-                                     dict:store(Id, {Count1 + 1, Puts2}, RunningTransactions);
-                                 error ->
-                                     Puts2 = dict:store(Vnode, PayloadPuts, dict:new()),
-                                     dict:store(Id, {1, Puts2}, RunningTransactions)
-                             end,
-
-    {Count, Puts} = dict:fetch(Id, NewRunningTransactions1),
-    if
-        Count == NVnodes ->
-            NewRunningTransactions = dict:erase(Id, NewRunningTransactions1),
-            NewLatestObjectVersions = commit_transaction(Id, Snapshot, Gets, Puts, Client, Lsn, LatestObjectVersions);
-        true ->
-            NewRunningTransactions = NewRunningTransactions1,
-            NewLatestObjectVersions = LatestObjectVersions
-    end,
-
-    State#state{next_lsn = Lsn + 1,
-                running_transactions = NewRunningTransactions,
-                latest_object_versions = NewLatestObjectVersions};
+    State#state{next_lsn = Lsn + 1};
 
 do_process_record(_Record, #state{next_lsn = Lsn} = State) ->
     State#state{next_lsn = Lsn + 1}.
 
-commit_transaction(Id, Snapshot, Gets, PutsDict, Client, Lsn, LatestObjectVersions) ->
-    {ConflictGets, _} = check_conflicts(Gets, Snapshot, Lsn, LatestObjectVersions),
-    Puts = dict:fold(fun(_, Value, Acc) -> Value ++ Acc end, [], PutsDict),
-    {ConflictPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Lsn, LatestObjectVersions),
+commit_transaction(Id, Puts, Lsn) ->
+    % Groups puts by vnode
+    PutsDict = lists:foldl(fun(Object, PutsDict1) ->
+                                   Vnode = get_vnode(Object),
+                                   case dict:find(Vnode, PutsDict1) of
+                                       {ok, Objects} ->
+                                           dict:store(Vnode, [Objects | Objects], PutsDict1);
+                                       error ->
+                                           dict:store(Vnode, [Object], PutsDict1)
+                                   end
+                           end, dict:new(), Puts),
 
-    Vnodes = dict:fetch_keys(PutsDict),
-    Conflict = ConflictGets or ConflictPuts,
-    if
-        Conflict -> 
-            send_transaction_commit_status_to(Client, Id, aborted, Lsn),
-            send_transaction_commit_status_to(Vnodes, Id, aborted, Lsn, PutsDict),
-            LatestObjectVersions;
-
-        true ->
-            send_transaction_commit_status_to(Client, Id, committed, Lsn),
-            send_transaction_commit_status_to(Vnodes, Id, committed, Lsn, PutsDict),
-            NewLatestObjectVersions
-    end.
-
-check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
-    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
-
-check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
-    {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
-    {Conflict, LatestObjectVersions};
-check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
-    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
-                              {ok, V} -> V;
-                              error -> -1
-                          end,
-
-    NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
-
-    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
-
-send_transaction_commit_status_to(Client, Id, Status, Lsn) ->
-    Reply = {transaction_commit_status, Id, Status, Lsn},
-    riak_core_vnode:reply(Client, Reply).
-
-send_transaction_commit_status_to(Vnodes, Id, Status, Lsn, PutsDict) ->
+    % Send commit message to vnodes
     lists:foreach(fun(Vnode) ->
                           Puts = dict:fetch(Vnode, PutsDict),
-                          riak_kv_vnode:transaction_commit_status([Vnode], Id, Status, Lsn, Puts)
-                  end, Vnodes).
+                          riak_kv_vnode:commit_transaction([Vnode], Id, Puts, Lsn)
+                  end, dict:fetch_keys(PutsDict)).
 
-get_vnode(Bkey) ->
+get_vnode(Object) ->
+    Bkey = riak_object:bkey(Object),
     DocIdx = riak_core_util:chash_key(Bkey),
     [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
     Vnode.

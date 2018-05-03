@@ -15,7 +15,9 @@
 
 -include("riak_kv_log.hrl").
 
--record(state, {lsn, log}).
+-define(DEFAULT_TIMEOUT, 60000).
+
+-record(state, {lsn, log, latest_object_versions}).
 
 
 %%%===================================================================
@@ -27,7 +29,7 @@ start_link() ->
 
 
 append_record(Record) ->
-    gen_server:call({global, ?MODULE}, {append_record, Record}).
+    gen_server:call({global, ?MODULE}, {append_record, Record}, ?DEFAULT_TIMEOUT).
 
 
 new_log_record(Type, Payload) ->
@@ -57,22 +59,33 @@ init(_Args) ->
     lager:info("Disk log options ~p~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
 
-    State = #state{lsn = 0, log = Log},
+    State = #state{lsn = 0, log = Log, latest_object_versions = dict:new()},
     {ok, State}.
 
 
-handle_call({append_record, Record}, _From, #state{lsn = Lsn} = State)->
+handle_call(
+  {append_record, #log_record{type = transaction_commit,
+                              payload = Payload} = Record},
+  _From,
+  State
+)->
     verify_if_log_is_full(),
 
-    disk_log:log(?LOG, Record),
-    disk_log:sync(?LOG),
+    {Conflicts, NewState1} = check_conflicts(Payload, State),
 
-    riak_kv_transactions_committer:process_record(Lsn + 1, Record),
+    if
+        not Conflicts ->
+            NewState = append_record(Record, NewState1),
+            Reply = {ok, NewState#state.lsn};
+        true ->
+            NewState = NewState1,
+            Reply = {not_appended, NewState1#state.lsn}
+    end,
 
-    lager:info("Record ~p was appended to the log~n", [Record]),
+    {reply, Reply, NewState};
 
-    NewState = State#state{lsn = Lsn + 1},
-    {reply, ok, NewState};
+handle_call({append_record, _Record}, _From, State)->
+    {reply, error, State};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at handle_call: ~p~n", [Request]),
@@ -112,3 +125,45 @@ verify_if_log_is_full() ->
         true ->
             ok
     end.
+
+check_conflicts({_Id, Snapshot, Gets, PutsObjects},
+                #state{lsn = Lsn, latest_object_versions = LatestObjectVersions} = State) ->
+    {ConflictsGets, _} = check_conflicts(Gets, Snapshot, Lsn + 1, LatestObjectVersions),
+    Puts = lists:map(fun riak_object:bkey/1, PutsObjects),
+    {ConflictsPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Lsn + 1, LatestObjectVersions),
+
+    Conflicts = ConflictsGets or ConflictsPuts,
+    if
+        Conflicts -> {Conflicts, State};
+        true ->
+            NewState = State#state{latest_object_versions = NewLatestObjectVersions},
+            {Conflicts, NewState}
+    end.
+
+check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
+    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
+
+check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
+    {true, LatestObjectVersions};
+check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
+    {Conflict, LatestObjectVersions};
+check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
+    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
+                              {ok, V} -> V;
+                              error -> -1
+                          end,
+
+    NewConflict = Conflict or (LatestObjectVersion > Snapshot),
+    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
+
+    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
+
+append_record(Record, #state{lsn = Lsn} = State) ->
+    disk_log:log(?LOG, Record),
+    disk_log:sync(?LOG),
+
+    riak_kv_transactions_committer:process_record(Lsn + 1, Record),
+
+    lager:info("Record ~p was appended to the log~n", [Record]),
+
+    State#state{lsn = Lsn + 1}.

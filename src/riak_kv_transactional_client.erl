@@ -126,15 +126,11 @@ handle_call(
 handle_call(
   {put, Key, Value},
   _From,
-  #state{client = Client, clock = Clock} = State
+  #state{clock = Clock} = State
  ) ->
     Id = erlang:phash2({self(), os:timestamp()}),
     Object = create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1),
-    {Status, Lsn} = Client:commit_transaction(Id, Clock, [], [Object]),
-
-    Reply = commit_reply(Status),
-    NewState = State#state{clock = Lsn},
-    {reply, Reply, NewState};
+    do_commit_transaction(Id, Clock, [], [Object], State);
 
 handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     Id = erlang:phash2({self(), os:timestamp()}),
@@ -353,8 +349,8 @@ check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_version(Object) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
-commit_reply(committed) -> ok;
-commit_reply(aborted) -> {error, aborted};
+commit_reply(ok) -> ok;
+commit_reply(not_appended) -> {error, aborted};
 commit_reply(_Status) -> error.
 
 create_object(Bucket, Key, Value, Id, TentativeVersion) ->
@@ -367,7 +363,7 @@ do_commit_transaction(Id, undefined, Gets, Puts, #state{clock = Clock} = State) 
     do_commit_transaction(Id, Clock, Gets, Puts, State);
 
 do_commit_transaction(_Id, Snapshot, _Gets, [], State) ->
-    Reply = commit_reply(committed),
+    Reply = commit_reply(ok),
     NewState1 = clean_transaction_state(State),
     NewState = NewState1#state{clock = Snapshot},
     {reply, Reply, NewState};
