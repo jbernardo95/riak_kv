@@ -80,10 +80,10 @@ verify_message_queue_length() ->
 
 do_process_record(
   #log_record{type = transaction_commit,
-              payload = {Id, _Snapshot, _Gets, Puts}} = Record,
+              payload = {Id, _Snapshot, _Gets, Puts}} = _Record,
   #state{next_lsn = Lsn} = State
 ) ->
-    lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
+    %lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
 
     commit_transaction(Id, Puts, Lsn),
 
