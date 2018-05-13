@@ -28,8 +28,8 @@
          start_vnodes/1,
          commit_transaction/6,
          commit_transaction/7,
-         transaction_commit_status/5,
-         transaction_commit_status/6,
+         transaction_validation/5,
+         transaction_validation/6,
          get/3,
          get/4,
          del/3,
@@ -91,7 +91,6 @@
 -include_lib("riak_kv_map_phase.hrl").
 -include_lib("riak_core_pb.hrl").
 -include("riak_kv_types.hrl").
--include("riak_kv_log.hrl").
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -247,18 +246,18 @@ start_vnodes(IdxList) ->
 test_vnode(I) ->
     riak_core_vnode:start_link(riak_kv_vnode, I, infinity).
 
-commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes) ->
-    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, {fsm, undefined, self()}).
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations) ->
+    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations, {fsm, undefined, self()}).
 
-commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NVnodes, Sender) ->
-    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NVnodes),
+commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations, Sender) ->
+    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NValidations),
     riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
-transaction_commit_status(Preflist, Id, Status, Lsn, Puts) ->
-    transaction_commit_status(Preflist, Id, Status, Lsn, Puts, {raw, undefined, self()}).
+transaction_validation(Preflist, Id, Puts, Conflicts, Lsn) ->
+    transaction_validation(Preflist, Id, Puts, Conflicts, Lsn, {raw, undefined, self()}).
 
-transaction_commit_status(Preflist, Id, Status, Lsn, Puts, Sender) ->
-    Req = riak_kv_requests:new_transaction_status_request(Id, Status, Lsn, Puts),
+transaction_validation(Preflist, Id, Puts, Conflicts, Lsn, Sender) ->
+    Req = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
     riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
 
 get(Preflist, BKey, ReqId) ->
@@ -547,7 +546,7 @@ handle_overload_command(Req, Sender, Idx) ->
 
 handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
-handle_overload_request(kv_transaction_status_request, _Req, Sender, Idx) ->
+handle_overload_request(kv_transaction_validation_request, _Req, Sender, Idx) ->
     erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
@@ -790,8 +789,8 @@ handle_command(Req, Sender, State) ->
 handle_request(kv_commit_transaction_request, Req, Sender, State) ->
     NewState = handle_commit_transaction_request(Req, Sender, State),
     {noreply, NewState};
-handle_request(kv_transaction_status_request, Req, Sender, State) ->
-    NewState = handle_transaction_status_request(Req, Sender, State),
+handle_request(kv_transaction_validation_request, Req, Sender, State) ->
+    NewState = handle_transaction_validation_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
@@ -1361,34 +1360,33 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     % Save puts as temporary
-    Puts1 = riak_kv_requests:get_puts(Req),
-    FoldFun = fun(Object, {Puts2, State1}) ->
+    Puts = riak_kv_requests:get_puts(Req),
+    FoldFun = fun(Object, State1) ->
                       Bkey = riak_object:bkey(Object),
                       {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
-                      {[riak_object:bkey(Object) | Puts2], State2}
+                      State2
               end,
-    {Puts, NewState} = lists:foldl(FoldFun, {[], State}, Puts1),
+    NewState = lists:foldl(FoldFun, State, Puts),
 
-    % Append commit record to log
+    % Send transaction to the transactions manager for validation
     Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
-    NVnodes = riak_kv_requests:get_n_vnodes(Req),
-    Record = riak_kv_log:new_log_record(transaction_commit, {Id, Snapshot, Gets, Puts, NVnodes, Sender}),
-    riak_kv_log:append_record(Record),
+    NValidations = riak_kv_requests:get_n_validations(Req),
+    riak_kv_transactions_manager:validate_and_commit(Idx, Id, Snapshot, Gets, Puts, NValidations, Sender),
 
     NewState.
 
-handle_transaction_status_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling transaction status request ~p at vnode ~p~n", [Req, Idx]),
+handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
-    Status = riak_kv_requests:get_status(Req),
-    Lsn = riak_kv_requests:get_lsn(Req),
     Puts = riak_kv_requests:get_puts(Req),
+    Conflicts = riak_kv_requests:get_conflicts(Req),
+    Lsn = riak_kv_requests:get_lsn(Req),
 
     Metadata2 = dict:store(<<"transaction_id">>, Id, dict:new()),
-    Metadata1 = dict:store(<<"transaction_status">>, Status, Metadata2),
+    Metadata1 = dict:store(<<"transaction_conflicts">>, Conflicts, Metadata2),
     Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
 
     % Commit or discard each temporary put

@@ -2,56 +2,46 @@
 
 -behaviour(gen_server).
 
--export([start_link/0,
-         process_record/2,
-         print_state/0]).
+-export([start_link/1,
+         commit/7,
+         print_state/1]).
 
--export([code_change/3,
+-export([init/1,
          handle_call/3,
          handle_cast/2,
-	     handle_info/2,
-	     init/1,
-	     terminate/2]).
+         handle_info/2,
+         terminate/2,
+         code_change/3]).
 
--include("riak_kv_log.hrl").
-
--define(MESSAGE_QUEUE_LENGTH_THRESHOLD, 100000).
-
--record(state, {next_lsn,
-                running_transactions,
-                latest_object_versions}).
+-record(state, {n, running_transactions}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link() ->
-    gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
+start_link(N) ->
+    gen_server:start_link({global, {?MODULE, N}}, ?MODULE, N, []).
 
-process_record(Lsn, Record) ->
-    gen_server:cast({global, ?MODULE}, {process_record, Lsn, Record}).
+commit(N, Id, Puts, NValidations, Client, Conflicts, Lsn) ->
+    gen_server:cast({global, {?MODULE, N}}, {commit, Id, Puts, NValidations, Client, Conflicts, Lsn}).
 
-print_state() ->
-    gen_server:cast({global, ?MODULE}, print_state).
+print_state(N) ->
+    gen_server:cast({global, {?MODULE, N}}, print_state).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init(_Args) ->
-    State = #state{next_lsn = 1,
-                   running_transactions = dict:new(),
-                   latest_object_versions = dict:new()},
+init(N) ->
+    State = #state{n = N, running_transactions = dict:new()},
     {ok, State}.
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({process_record, Lsn, Record}, #state{next_lsn = Lsn} = State) ->
-    verify_message_queue_length(),
-    NewState = do_process_record(Record, State),
-    {noreply, NewState};
+handle_cast({commit, Id, Puts, NValidations, Client, Conflicts, Lsn}, State) ->
+    do_commit(Id, Puts, NValidations, Client, Conflicts, Lsn, State);
 
 handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
@@ -73,101 +63,71 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-verify_message_queue_length() ->
-    {message_queue_len, MessageQueueLength} = process_info(self(), message_queue_len),
-    if
-        MessageQueueLength > ?MESSAGE_QUEUE_LENGTH_THRESHOLD ->
-            lager:critical("Transactions committer message queue length is past the threshold, currently at ~p~n", [MessageQueueLength]);
-        true ->
-            ok
-    end.
+% Root committer
+do_commit(Id, Puts, NValidations, Client, Conflicts, Lsn1,
+          #state{n = root, running_transactions = RunningTransactions} = State) ->
 
-do_process_record(
-  #log_record{type = transaction_commit,
-              payload = Payload} = Record,
-  #state{next_lsn = Lsn,
-         running_transactions = RunningTransactions,
-         latest_object_versions = LatestObjectVersions} = State
-) ->
-    lager:info("Processing log record #~p ~p~n", [Lsn, Record]),
-
-    {Id, Snapshot, Gets, [FirstPut | _] = PayloadPuts, NVnodes, Client} = Payload,
-
-    Vnode = get_vnode(FirstPut),
-    NewRunningTransactions1 = case dict:find(Id, RunningTransactions) of
-                                 {ok, {Count1, Puts1}} ->
-                                     Puts2 = dict:store(Vnode, PayloadPuts, Puts1),
-                                     dict:store(Id, {Count1 + 1, Puts2}, RunningTransactions);
-                                 error ->
-                                     Puts2 = dict:store(Vnode, PayloadPuts, dict:new()),
-                                     dict:store(Id, {1, Puts2}, RunningTransactions)
-                             end,
-
-    {Count, Puts} = dict:fetch(Id, NewRunningTransactions1),
-    if
-        Count == NVnodes ->
-            NewRunningTransactions = dict:erase(Id, NewRunningTransactions1),
-            NewLatestObjectVersions = commit_transaction(Id, Snapshot, Gets, Puts, Client, Lsn, LatestObjectVersions);
-        true ->
-            NewRunningTransactions = NewRunningTransactions1,
-            NewLatestObjectVersions = LatestObjectVersions
+    % Update transaction metadata
+    Vnode = get_vnode(hd(Puts)),
+    case dict:find(Id, RunningTransactions) of
+        {ok, {ReceivedValidations1, VnodesPuts1, Lsn2}} ->
+            NewVnodePuts = dict:update(Vnode, fun(Old) -> Old ++ Puts end, Puts, VnodesPuts1),
+            NewRunningTransactions = dict:store(Id, {ReceivedValidations1 + 1, NewVnodePuts, max(Lsn1, Lsn2)}, RunningTransactions);
+        error ->
+            NewVnodePuts = dict:store(Vnode, Puts, dict:new()),
+            NewRunningTransactions = dict:store(Id, {1, NewVnodePuts, Lsn1}, RunningTransactions)
     end,
 
-    State#state{next_lsn = Lsn + 1,
-                running_transactions = NewRunningTransactions,
-                latest_object_versions = NewLatestObjectVersions};
-
-do_process_record(_Record, #state{next_lsn = Lsn} = State) ->
-    State#state{next_lsn = Lsn + 1}.
-
-commit_transaction(Id, Snapshot, Gets, PutsDict, Client, Lsn, LatestObjectVersions) ->
-    {ConflictGets, _} = check_conflicts(Gets, Snapshot, Lsn, LatestObjectVersions),
-    Puts = dict:fold(fun(_, Value, Acc) -> Value ++ Acc end, [], PutsDict),
-    {ConflictPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Lsn, LatestObjectVersions),
-
-    Vnodes = dict:fetch_keys(PutsDict),
-    Conflict = ConflictGets or ConflictPuts,
-    if
-        Conflict -> 
-            send_transaction_commit_status_to(Client, Id, aborted, Lsn),
-            send_transaction_commit_status_to(Vnodes, Id, aborted, Lsn, PutsDict),
-            LatestObjectVersions;
-
+    {ReceivedValidations, VnodePuts, Lsn} = dict:fetch(Id, NewRunningTransactions),
+    case ReceivedValidations of
+        NValidations ->
+            send_validation_result_to_client(Id, Conflicts, Lsn, Client),
+            send_validation_result_to_vnodes(Id, Conflicts, Lsn, VnodePuts),
+            lager:info("Transaction ~p committed~n", [Id]),
+            NewState = State#state{running_transactions = dict:erase(Id, NewRunningTransactions)};
         true ->
-            send_transaction_commit_status_to(Client, Id, committed, Lsn),
-            send_transaction_commit_status_to(Vnodes, Id, committed, Lsn, PutsDict),
-            NewLatestObjectVersions
-    end.
+            NewState = State#state{running_transactions = NewRunningTransactions}
+    end,
 
-check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
-    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
+    {noreply, NewState};
 
-check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
-    {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
-    {Conflict, LatestObjectVersions};
-check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
-    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
-                              {ok, V} -> V;
-                              error -> -1
-                          end,
+% Leaf committer
+% Transaction only needs one validation 
+% So it can be committed right away 
+do_commit(Id, Puts, 1 = _NValidations, Client, Conflicts, Lsn,
+          #state{running_transactions = RunningTransactions} = State) ->
 
-    NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
+    send_validation_result_to_client(Id, Conflicts, Lsn, Client),
 
-    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
+    Vnode = get_vnode(hd(Puts)),
+    riak_kv_vnode:transaction_validation([Vnode], Id, Puts, Conflicts, Lsn),
 
-send_transaction_commit_status_to(Client, Id, Status, Lsn) ->
-    Reply = {transaction_commit_status, Id, Status, Lsn},
-    riak_core_vnode:reply(Client, Reply).
+    lager:info("Transaction ~p committed~n", [Id]),
 
-send_transaction_commit_status_to(Vnodes, Id, Status, Lsn, PutsDict) ->
-    lists:foreach(fun(Vnode) ->
-                          Puts = dict:fetch(Vnode, PutsDict),
-                          riak_kv_vnode:transaction_commit_status([Vnode], Id, Status, Lsn, Puts)
-                  end, Vnodes).
+    NewState = State#state{running_transactions = dict:erase(Id, RunningTransactions)},
+    {noreply, NewState};
+
+% Leaf committer
+% Transaction needs more than one validation
+% So it is sent to a committer a level up in the tree
+% For now the transaction is sent to the root committer automatically
+% In the future the routing code should be changed so that the transaction is sent to the correct committer
+do_commit(Id, Puts, NValidations, Client, Conflicts, Lsn, State) ->
+    riak_kv_transactions_committer:commit(root, Id, Puts, NValidations, Client, Conflicts, Lsn),
+    {noreply, State}.
 
 get_vnode(Bkey) ->
     DocIdx = riak_core_util:chash_key(Bkey),
     [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
     Vnode.
+
+send_validation_result_to_client(Id, Conflicts, Lsn, Client) ->
+    Reply = {transaction_commit_result, Id, Conflicts, Lsn},
+    riak_core_vnode:reply(Client, Reply).
+
+send_validation_result_to_vnodes(Id, Conflicts, Lsn, VnodePuts) ->
+    Vnodes = dict:fetch_keys(VnodePuts),
+    lists:foreach(fun(Vnode) ->
+                          Puts = dict:fetch(Vnode, VnodePuts),
+                          riak_kv_vnode:transaction_validation([Vnode], Id, Puts, Conflicts, Lsn)
+                  end, Vnodes).

@@ -11,7 +11,7 @@
          code_change/4]).
 -export([prepare/2,
          execute/2,
-         wait_for_transactions_committer/2,
+         wait_for_transactions_manager/2,
          respond_to_client/2]).
 
 -record(state, {from,
@@ -21,7 +21,7 @@
                 puts,
                 preflist_puts, 
                 timerref,
-                status,
+                conflicts,
                 lsn,
                 timeout}).
 
@@ -57,7 +57,7 @@ init([From, Id, Snapshot, Gets, Puts]) ->
                        puts = Puts,
                        preflist_puts = undefined,
                        timerref = undefined,
-                       status = undefined,
+                       conflicts = undefined,
                        lsn = undefined,
                        timeout = false},
     {ok, prepare, StateData, 0}.
@@ -86,35 +86,35 @@ execute(
          preflist_puts = PreflistPuts} = StateData
 ) ->
     Vnodes = dict:fetch_keys(PreflistPuts),
-    NVnodes = length(Vnodes),
+    NValidations = length(Vnodes),
     lists:foreach(fun(Vnode) ->
                           Puts = dict:fetch(Vnode, PreflistPuts),
-                          riak_kv_vnode:commit_transaction([Vnode], Id, Snapshot, Gets, Puts, NVnodes)
+                          riak_kv_vnode:commit_transaction([Vnode], Id, Snapshot, Gets, Puts, NValidations)
                   end, Vnodes),
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
-    {next_state, wait_for_transactions_committer, NewStateData}.
+    {next_state, wait_for_transactions_manager, NewStateData}.
 
-wait_for_transactions_committer(
-  {transaction_commit_status, Id, Status, Lsn},
+wait_for_transactions_manager(
+  {transaction_commit_result, Id, Conflicts, Lsn},
   #state{id = Id} = StateData
 ) ->
-    NewStateData = StateData#state{status = Status, lsn = Lsn},
+    NewStateData = StateData#state{conflicts = Conflicts, lsn = Lsn},
     {next_state, respond_to_client, NewStateData, 0};
 
-wait_for_transactions_committer(timeout, StateData) ->
+wait_for_transactions_manager(timeout, StateData) ->
     NewStateData = StateData#state{timeout = true},
     {next_state, respond_to_client, NewStateData, 0}.
 
 respond_to_client(timeout,
                   #state{from = {raw, ReqId, Pid},
-                         status = Status,
+                         conflicts = Conflicts,
                          lsn = Lsn,
                          timeout = Timeout} = StateData) ->
     ClientReply = if
                       Timeout -> Timeout;
-                      true -> {Status, Lsn}
+                      true -> {Conflicts, Lsn}
                   end,
     FsmReply = {ReqId, ClientReply},
     erlang:send(Pid, FsmReply),

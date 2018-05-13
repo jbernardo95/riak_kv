@@ -307,16 +307,16 @@ append_merge_contents(
         [NewContent] = NewContents,
         [NewContent | OldContents].
 
-transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) ->
+transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObject) ->
     Metadata = get_metadata(NewObject),
     Id = dict:fetch(<<"transaction_id">>, Metadata),
-    Status = dict:fetch(<<"transaction_status">>, Metadata),
+    Conflicts = dict:fetch(<<"transaction_conflicts">>, Metadata),
     Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
 
-    MaximumObjectVersions = case Status of
-                                committed ->
+    MaximumObjectVersions = case Conflicts of
+                                false ->
                                     app_helper:get_env(riak_kv, maximum_object_versions) - 1;
-                                aborted ->
+                                true ->
                                     app_helper:get_env(riak_kv, maximum_object_versions)
                             end,
 
@@ -336,12 +336,12 @@ transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) 
                               if
                                   % If transaction was committed
                                   % Commit tentative value by adding a version to it
-                                  Status == committed ->
+                                  Conflicts == false ->
                                       NewM = dict:store(?VERSION, Lsn, M),
                                       {Versions, [C#r_content{metadata = NewM} | Rest]};
 
                                   % Else discard the tentative value
-                                  Status == aborted ->
+                                  Conflicts == true ->
                                       {Versions, Rest}
                               end;
 
@@ -368,8 +368,8 @@ transaction_status_merge_contents(#r_object{contents = OldContents}, NewObject) 
 merge_contents(OldObject, NewObject, false) ->
     Metadata = get_metadata(NewObject),
 
-    Result = case dict:find(<<"transaction_status">>, Metadata) of
-                 {ok, _} -> transaction_status_merge_contents(OldObject, NewObject);
+    Result = case dict:find(<<"transaction_conflicts">>, Metadata) of
+                 {ok, _} -> transaction_validation_merge_contents(OldObject, NewObject);
                  error -> append_merge_contents(OldObject, NewObject) 
              end,
 

@@ -1,15 +1,15 @@
 #!/usr/bin/env escript
 
-main([DataPath, MaxNBytes, MaxNFiles]) ->
-    consume(DataPath, list_to_integer(MaxNBytes), list_to_integer(MaxNFiles)),
+main([LogName, DataPath, MaxNBytes, MaxNFiles]) ->
+    consume(LogName, DataPath, list_to_integer(MaxNBytes), list_to_integer(MaxNFiles)),
     halt(0);
 
 main(_) ->
     usage().
 
-consume(DataPath, MaxNBytes, MaxNFiles) ->
+consume(LogName, DataPath, MaxNBytes, MaxNFiles) ->
     DiskLogOptions = [
-        {name, riak_kv_log},
+        {name, LogName},
         {file, DataPath ++ "/data"},
         {repair, true},
         {type, wrap},
@@ -34,5 +34,5 @@ read_log_content(Log, Continuation, Terms) ->
     end.
 
 usage() ->
-    io:format("Usage: read_log data_path max_n_bytes max_n_files\n"),
+    io:format("Usage: read_log log_name data_path max_n_bytes max_n_files\n"),
     halt(1).

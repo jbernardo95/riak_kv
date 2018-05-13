@@ -85,7 +85,7 @@ handle_call(
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            Reply = {error, transaction_aborted},
+            Reply = {error, aborted},
             NewState = clean_transaction_state(NewState1),
             {reply, Reply, NewState};
         true ->
@@ -130,9 +130,9 @@ handle_call(
  ) ->
     Id = erlang:phash2({self(), os:timestamp()}),
     Object = create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1),
-    {Status, Lsn} = Client:commit_transaction(Id, Clock, [], [Object]),
+    {Conflicts, Lsn} = Client:commit_transaction(Id, Clock, [], [Object]),
 
-    Reply = commit_reply(Status),
+    Reply = commit_reply(Conflicts),
     NewState = State#state{clock = Lsn},
     {reply, Reply, NewState};
 
@@ -353,9 +353,9 @@ check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_version(Object) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
-commit_reply(committed) -> ok;
-commit_reply(aborted) -> {error, aborted};
-commit_reply(_Status) -> error.
+commit_reply(true) -> {error, aborted};
+commit_reply(false) -> ok;
+commit_reply(_) -> error.
 
 create_object(Bucket, Key, Value, Id, TentativeVersion) ->
     Object = riak_object:new(Bucket, Key, nil),
@@ -367,15 +367,15 @@ do_commit_transaction(Id, undefined, Gets, Puts, #state{clock = Clock} = State) 
     do_commit_transaction(Id, Clock, Gets, Puts, State);
 
 do_commit_transaction(_Id, Snapshot, _Gets, [], State) ->
-    Reply = commit_reply(committed),
+    Reply = commit_reply(false),
     NewState1 = clean_transaction_state(State),
     NewState = NewState1#state{clock = Snapshot},
     {reply, Reply, NewState};
 
 do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = Client} = State) ->
-    {Status, Lsn} = Client:commit_transaction(Id, Snapshot, Gets, Puts),
+    {Conflicts, Lsn} = Client:commit_transaction(Id, Snapshot, Gets, Puts),
 
-    Reply = commit_reply(Status),
+    Reply = commit_reply(Conflicts),
     NewState1 = clean_transaction_state(State),
     NewState = NewState1#state{clock = Lsn},
     {reply, Reply, NewState}.

@@ -790,19 +790,19 @@
     {commented, enabled}
 ]}.
 
-{mapping, "riak_kv.log.data_path", "riak_kv.log.data_path", [
+{mapping, "riak_kv.transactions_log.data_path", "riak_kv.transactions_log.data_path", [
     {datatype, directory},
-    {default, "$(platform_data_dir)/log"},
+    {default, "$(platform_data_dir)/transactions_log"},
     hidden
 ]}.
 
-{mapping, "riak_kv.log.max_n_bytes", "riak_kv.log.max_n_bytes", [
+{mapping, "riak_kv.transactions_log.max_n_bytes", "riak_kv.transactions_log.max_n_bytes", [
     {datatype, integer},
     {default, 1000000000},
     {commented, 1000000000}
 ]}.
 
-{mapping, "riak_kv.log.max_n_files", "riak_kv.log.max_n_files", [
+{mapping, "riak_kv.transactions_log.max_n_files", "riak_kv.transactions_log.max_n_files", [
     {datatype, integer},
     {default, 10},
     {commented, 10}
@@ -812,4 +812,10 @@
     {datatype, integer},
     {default, 5},
     {commented, 5}
+]}.
+
+{mapping, "riak_kv.n_transactions_managers", "riak_kv.n_transactions_managers", [
+    {datatype, integer},
+    {default, 1},
+    {commented, 2}
 ]}.
