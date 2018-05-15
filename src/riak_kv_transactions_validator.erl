@@ -77,7 +77,7 @@ do_validate(
     {ConflictsPuts, NewLatestObjectVersions} = check_conflicts(BkeyPuts, Snapshot, Lsn, LatestObjectVersions),
     Conflicts = ConflictsGets or ConflictsPuts,
 
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [Id, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [Id, Conflicts]),
 
     Record = riak_kv_transactions_log:new_log_record(Lsn, {Id, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
     riak_kv_transactions_log:append(N, Record),

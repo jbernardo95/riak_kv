@@ -83,7 +83,7 @@ do_commit(Id, Puts, NValidations, Client, Conflicts, Lsn1,
         NValidations ->
             send_validation_result_to_client(Id, Conflicts, Lsn, Client),
             send_validation_result_to_vnodes(Id, Conflicts, Lsn, VnodePuts),
-            lager:info("Transaction ~p committed~n", [Id]),
+            %lager:info("Transaction ~p committed~n", [Id]),
             NewState = State#state{running_transactions = dict:erase(Id, NewRunningTransactions)};
         true ->
             NewState = State#state{running_transactions = NewRunningTransactions}
@@ -102,7 +102,7 @@ do_commit(Id, Puts, 1 = _NValidations, Client, Conflicts, Lsn,
     Vnode = get_vnode(hd(Puts)),
     riak_kv_vnode:transaction_validation([Vnode], Id, Puts, Conflicts, Lsn),
 
-    lager:info("Transaction ~p committed~n", [Id]),
+    %lager:info("Transaction ~p committed~n", [Id]),
 
     NewState = State#state{running_transactions = dict:erase(Id, RunningTransactions)},
     {noreply, NewState};

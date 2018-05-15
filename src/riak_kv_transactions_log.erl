@@ -87,9 +87,9 @@ do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{n = N, 
     verify_if_log_is_full(Log),
 
     disk_log:log(Log, Record),
-    disk_log:sync(Log),
+    %disk_log:sync(Log),
 
-    lager:info("Record ~p was appended to the log~n", [Record]),
+    %lager:info("Record ~p was appended to the log~n", [Record]),
 
     {Id, _Snapshot, _Gets, Puts, NValidations, Client, Conflicts} = Transaction,
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
