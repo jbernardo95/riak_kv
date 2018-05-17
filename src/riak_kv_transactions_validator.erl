@@ -13,7 +13,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {n, lsn, step, latest_object_versions}).
+-define(LATEST_OBJECT_VERSIONS, latest_object_versions).
+
+-record(state, {n, lsn, step}).
 
 %%%===================================================================
 %%% API
@@ -33,11 +35,12 @@ print_state(N) ->
 %%%===================================================================
 
 init(N) ->
+    ets:new(?LATEST_OBJECT_VERSIONS, [private, named_table]), 
+
     {ok, Step} = application:get_env(riak_kv, n_transactions_managers),
     State = #state{n = N,
                    lsn = N + 1,
-                   step = Step,
-                   latest_object_versions = dict:new()},
+                   step = Step},
     {ok, State}.
 
 handle_call(Request, _From, State) ->
@@ -69,12 +72,11 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 
 do_validate(
   Id, Snapshot, Gets, Puts, NValidations, Client,
-  #state{n = N, lsn = Lsn, step = Step,
-         latest_object_versions = LatestObjectVersions} = State
+  #state{n = N, lsn = Lsn, step = Step} = State
 ) ->
-    {ConflictsGets, _} = check_conflicts(Gets, Snapshot, Lsn, LatestObjectVersions),
+    ConflictsGets = check_conflicts(Gets, Snapshot),
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
-    {ConflictsPuts, NewLatestObjectVersions} = check_conflicts(BkeyPuts, Snapshot, Lsn, LatestObjectVersions),
+    ConflictsPuts = check_conflicts(BkeyPuts, Snapshot),
     Conflicts = ConflictsGets or ConflictsPuts,
 
     lager:info("Transaction ~p validated, conflicts: ~p~n", [Id, Conflicts]),
@@ -82,29 +84,27 @@ do_validate(
     Record = riak_kv_transactions_log:new_log_record(Lsn, {Id, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
     riak_kv_transactions_log:append(N, Record),
     
-    case Conflicts of
+    if
+        not Conflicts ->
+            lists:foreach(fun(Bkey) -> ets:insert(?LATEST_OBJECT_VERSIONS, {Bkey, Lsn}) end, BkeyPuts);
         true ->
-            NewState = State#state{lsn = Lsn + Step};
-        false ->
-            NewState = State#state{lsn = Lsn + Step,
-                                   latest_object_versions = NewLatestObjectVersions}
+            ok
     end,
+
+    NewState = State#state{lsn = Lsn + Step},
     {noreply, NewState}.
 
-check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
-    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
+check_conflicts(Objects, Snapshot) ->
+    check_conflicts(Objects, Snapshot, false).
 
-check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
-    {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
-    {Conflict, LatestObjectVersions};
-check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
-    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
-                              {ok, V} -> V;
-                              error -> -1
+check_conflicts(_Objects, _Snapshot, true) -> true;
+check_conflicts([], _Snapshot, Conflict) -> Conflict;
+check_conflicts([Bkey | Rest], Snapshot, Conflict) ->
+    LatestObjectVersion = case ets:lookup(?LATEST_OBJECT_VERSIONS, Bkey) of
+                              [{Bkey, Version}] -> Version;
+                              [] -> -1
                           end,
 
     NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
 
-    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
+    check_conflicts(Rest, Snapshot, NewConflict).
