@@ -99,9 +99,10 @@ do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{n = N, 
 
 verify_if_log_is_full(Log) ->
     Info = disk_log:info(Log),
+    {_, MaxNoFiles} = proplists:get_value(size, Info, {0, 0}),
     {SinceLogWasOpened, _} = proplists:get_value(no_overflows, Info, {0, 0}),
     if
-        SinceLogWasOpened > 0 ->
+        SinceLogWasOpened > MaxNoFiles ->
             lager:critical("Log is full~n", []),
             exit(log_is_full);
         true ->
