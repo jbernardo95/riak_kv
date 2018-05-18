@@ -123,6 +123,7 @@
 -type update_hook() :: module().
 
 -record(state, {idx :: partition(),
+                hashed_idx :: non_neg_integer(),
                 mod :: module(),
                 async_put :: boolean(),
                 modstate :: term(),
@@ -502,22 +503,24 @@ init([Index]) ->
                 _ ->
                     false
             end,
-            State = #state{idx=Index,
-                           async_folding=AsyncFolding,
-                           mod=Mod,
+            HashedIdx = erlang:phash2(Index),
+            State = #state{idx = Index,
+                           hashed_idx = HashedIdx,
+                           async_folding = AsyncFolding,
+                           mod = Mod,
                            async_put = DoAsyncPut,
-                           modstate=ModState,
-                           vnodeid=VId,
-                           counter=CounterState,
-                           status_mgr_pid=StatusMgr,
-                           delete_mode=DeleteMode,
-                           bucket_buf_size=BucketBufSize,
-                           index_buf_size=IndexBufSize,
-                           key_buf_size=KeyBufSize,
-                           mrjobs=dict:new(),
-                           md_cache=MDCache,
-                           md_cache_size=MDCacheSize,
-                           update_hook=update_hook()},
+                           modstate = ModState,
+                           vnodeid = VId,
+                           counter = CounterState,
+                           status_mgr_pid = StatusMgr,
+                           delete_mode = DeleteMode,
+                           bucket_buf_size = BucketBufSize,
+                           index_buf_size = IndexBufSize,
+                           key_buf_size = KeyBufSize,
+                           mrjobs = dict:new(),
+                           md_cache = MDCache,
+                           md_cache_size = MDCacheSize,
+                           update_hook = update_hook()},
             try_set_vnode_lock_limit(Index),
             case AsyncFolding of
                 true ->
@@ -1356,8 +1359,8 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+handle_commit_transaction_request(Req, Sender, #state{hashed_idx = HashedIdx} = State) ->
+    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, HashedIdx, Sender]),
 
     % Save puts as temporary
     Puts = riak_kv_requests:get_puts(Req),
@@ -1373,7 +1376,7 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     NValidations = riak_kv_requests:get_n_validations(Req),
-    riak_kv_transactions_manager:validate_and_commit(Idx, Id, Snapshot, Gets, Puts, NValidations, Sender),
+    riak_kv_transactions_manager:validate_and_commit(HashedIdx, Id, Snapshot, Gets, Puts, NValidations, Sender),
 
     NewState.
 

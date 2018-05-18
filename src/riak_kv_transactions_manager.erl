@@ -13,9 +13,9 @@
 start_link(N) ->
     supervisor:start_link({global, {?MODULE, N}}, ?MODULE, N).
 
-validate_and_commit(Idx, Id, Snapshot, Gets, Puts, NValidations, Client) ->
+validate_and_commit(HashedIdx, Id, Snapshot, Gets, Puts, NValidations, Client) ->
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    N = Idx rem NTransactionsManagers,
+    N = HashedIdx rem NTransactionsManagers,
     riak_kv_transactions_validator:validate(N, Id, Snapshot, Gets, Puts, NValidations, Client).
 
 %%%===================================================================
