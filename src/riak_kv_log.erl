@@ -16,8 +16,9 @@
 -include("riak_kv_log.hrl").
 
 -define(DEFAULT_TIMEOUT, 60000).
+-define(LATEST_OBJECT_VERSIONS, latest_object_versions).
 
--record(state, {lsn, log, latest_object_versions}).
+-record(state, {lsn, log}).
 
 
 %%%===================================================================
@@ -56,10 +57,11 @@ init(_Args) ->
         {format, internal},
         {mode, read_write}
     ],
-    lager:info("Disk log options ~p~n", [DiskLogOptions]),
     {ok, Log} = disk_log:open(DiskLogOptions),
 
-    State = #state{lsn = 0, log = Log, latest_object_versions = dict:new()},
+    ets:new(?LATEST_OBJECT_VERSIONS, [private, named_table]),
+
+    State = #state{lsn = 0, log = Log},
     {ok, State}.
 
 
@@ -71,15 +73,15 @@ handle_call(
 )->
     verify_if_log_is_full(),
 
-    {Conflicts, NewState1} = check_conflicts(Payload, State),
+    Conflicts = check_conflicts(Payload),
 
     if
         not Conflicts ->
-            NewState = append_record(Record, NewState1),
+            NewState = append_record(Record, State),
             Reply = {ok, NewState#state.lsn};
         true ->
-            NewState = NewState1,
-            Reply = {not_appended, NewState1#state.lsn}
+            NewState = State,
+            Reply = {not_appended, State#state.lsn}
     end,
 
     {reply, Reply, NewState};
@@ -127,41 +129,34 @@ verify_if_log_is_full() ->
             ok
     end.
 
-check_conflicts({_Id, Snapshot, Gets, PutsObjects},
-                #state{lsn = Lsn, latest_object_versions = LatestObjectVersions} = State) ->
-    {ConflictsGets, _} = check_conflicts(Gets, Snapshot, Lsn + 1, LatestObjectVersions),
+check_conflicts({_Id, Snapshot, Gets, PutsObjects}) ->
+    ConflictsGets = check_conflicts(Gets, Snapshot),
     Puts = lists:map(fun riak_object:bkey/1, PutsObjects),
-    {ConflictsPuts, NewLatestObjectVersions} = check_conflicts(Puts, Snapshot, Lsn + 1, LatestObjectVersions),
+    ConflictsPuts = check_conflicts(Puts, Snapshot),
+    ConflictsGets or ConflictsPuts.
 
-    Conflicts = ConflictsGets or ConflictsPuts,
-    if
-        Conflicts -> {Conflicts, State};
-        true ->
-            NewState = State#state{latest_object_versions = NewLatestObjectVersions},
-            {Conflicts, NewState}
-    end.
+check_conflicts(Objects, Snapshot) ->
+    check_conflicts(Objects, Snapshot, false).
 
-check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions) ->
-    check_conflicts(Objects, Snapshot, Lsn, LatestObjectVersions, false).
-
-check_conflicts(_Objects, _Snapshot, _Lsn, LatestObjectVersions, true) ->
-    {true, LatestObjectVersions};
-check_conflicts([], _Snapshot, _Lsn, LatestObjectVersions, Conflict) ->
-    {Conflict, LatestObjectVersions};
-check_conflicts([Bkey | Rest], Snapshot, Lsn, LatestObjectVersions, Conflict) ->
-    LatestObjectVersion = case dict:find(Bkey, LatestObjectVersions) of
-                              {ok, V} -> V;
-                              error -> -1
+check_conflicts(_Objects, _Snapshot, true) -> true;
+check_conflicts([], _Snapshot, Conflict) -> Conflict;
+check_conflicts([Bkey | Rest], Snapshot, Conflict) ->
+    LatestObjectVersion = case ets:lookup(?LATEST_OBJECT_VERSIONS, Bkey) of
+                              [{Bkey, Version}] -> Version;
+                              [] -> -1
                           end,
 
     NewConflict = Conflict or (LatestObjectVersion > Snapshot),
-    NewLatestObjectVersions = dict:store(Bkey, Lsn, LatestObjectVersions),
 
-    check_conflicts(Rest, Snapshot, Lsn, NewLatestObjectVersions, NewConflict).
+    check_conflicts(Rest, Snapshot, NewConflict).
 
-append_record(Record, #state{lsn = Lsn} = State) ->
+append_record(#log_record{payload = {_, _, _, Puts}} = Record, #state{lsn = Lsn} = State) ->
     disk_log:log(?LOG, Record),
     disk_log:sync(?LOG),
+
+    lists:foreach(fun(Object) ->
+                          ets:insert(?LATEST_OBJECT_VERSIONS, {riak_object:bkey(Object), Lsn + 1})
+                  end, Puts),
 
     riak_kv_transactions_committer:process_record(Lsn + 1, Record),
 
