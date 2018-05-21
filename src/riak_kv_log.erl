@@ -152,7 +152,7 @@ check_conflicts([Bkey | Rest], Snapshot, Conflict) ->
 
 append_record(#log_record{payload = {_, _, _, Puts}} = Record, #state{lsn = Lsn} = State) ->
     disk_log:log(?LOG, Record),
-    disk_log:sync(?LOG),
+    %disk_log:sync(?LOG),
 
     lists:foreach(fun(Object) ->
                           ets:insert(?LATEST_OBJECT_VERSIONS, {riak_object:bkey(Object), Lsn + 1})
@@ -160,6 +160,6 @@ append_record(#log_record{payload = {_, _, _, Puts}} = Record, #state{lsn = Lsn}
 
     riak_kv_transactions_committer:process_record(Lsn + 1, Record),
 
-    lager:info("Record ~p was appended to the log~n", [Record]),
+    %lager:info("Record ~p was appended to the log~n", [Record]),
 
     State#state{lsn = Lsn + 1}.

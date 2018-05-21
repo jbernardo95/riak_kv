@@ -1343,8 +1343,8 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_commit_transaction_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling commit transaction request ~p at vnode ~p~n", [Req, Idx]),
+handle_commit_transaction_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling commit transaction request ~p at vnode ~p~n", [Req, Idx]),
 
     Id = riak_kv_requests:get_id(Req),
     Puts = riak_kv_requests:get_puts(Req),
