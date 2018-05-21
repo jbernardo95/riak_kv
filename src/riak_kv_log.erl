@@ -117,9 +117,10 @@ code_change(_OldVsn, State, _Extra) ->
 
 verify_if_log_is_full() ->
     Info = disk_log:info(?LOG),
+    {_, MaxNoFiles} = proplists:get_value(size, Info, {0, 0}),
     {SinceLogWasOpened, _} = proplists:get_value(no_overflows, Info, {0, 0}),
     if
-        SinceLogWasOpened > 0 ->
+        SinceLogWasOpened > MaxNoFiles ->
             lager:critical("Log is full~n", []),
             exit(log_is_full);
         true ->
