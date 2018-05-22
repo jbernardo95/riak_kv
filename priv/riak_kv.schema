@@ -790,32 +790,37 @@
     {commented, enabled}
 ]}.
 
-{mapping, "riak_kv.transactions_log.data_path", "riak_kv.transactions_log.data_path", [
-    {datatype, directory},
-    {default, "$(platform_data_dir)/transactions_log"},
-    hidden
-]}.
-
-{mapping, "riak_kv.transactions_log.max_n_bytes", "riak_kv.transactions_log.max_n_bytes", [
-    {datatype, integer},
-    {default, 1000000000},
-    {commented, 1000000000}
-]}.
-
-{mapping, "riak_kv.transactions_log.max_n_files", "riak_kv.transactions_log.max_n_files", [
-    {datatype, integer},
-    {default, 10},
-    {commented, 10}
-]}.
-
+%% @doc Specifies the maximum number of versions that can be stored per object
 {mapping, "object.versions.maximum", "riak_kv.maximum_object_versions", [
     {datatype, integer},
     {default, 5},
     {commented, 5}
 ]}.
 
-{mapping, "riak_kv.n_transactions_managers", "riak_kv.n_transactions_managers", [
+%% @doc Specifies the path there transaction log files will be stored
+{mapping, "transactions_manager.log.data_path", "riak_kv.transactions_log.data_path", [
+    {datatype, directory},
+    {default, "$(platform_data_dir)/transactions_log"},
+    hidden
+]}.
+
+%% @doc Specifies the maximum number of bytes each log file can have
+{mapping, "transactions_manager.log.max_n_bytes", "riak_kv.transactions_log.max_n_bytes", [
+    {datatype, integer},
+    {default, 1000000000},
+    {commented, 1000000000}
+]}.
+
+%% @doc Specifies the maximum number of log files that the transactions log can have  
+{mapping, "transactions_manager.log.max_n_files", "riak_kv.transactions_log.max_n_files", [
+    {datatype, integer},
+    {default, 10},
+    {commented, 10}
+]}.
+
+%% @doc Specifies the number of leaf transaction managers
+{mapping, "transactions_manager.n_leafs", "riak_kv.n_leaf_transactions_managers", [
     {datatype, integer},
     {default, 1},
-    {commented, 2}
+    {commented, 1}
 ]}.
