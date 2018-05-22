@@ -15,31 +15,31 @@
 
 -define(LATEST_OBJECT_VERSIONS, latest_object_versions).
 
--record(state, {n, lsn, step}).
+-record(state, {id, lsn, step}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link(N) ->
-    gen_server:start_link({global, {?MODULE, N}}, ?MODULE, N, []).
+start_link(Id) ->
+    gen_server:start_link({global, {?MODULE, Id}}, ?MODULE, Id, []).
 
-validate(N, Id, Snapshot, Gets, Puts, NValidations, Client) ->
-    gen_server:cast({global, {?MODULE, N}}, {validate, Id, Snapshot, Gets, Puts, NValidations, Client}).
+validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
+    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}).
 
-print_state(N) ->
-    gen_server:cast({global, {?MODULE, N}}, print_state).
+print_state(Id) ->
+    gen_server:cast({global, {?MODULE, Id}}, print_state).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-init(N) ->
+init(Id) ->
     ets:new(?LATEST_OBJECT_VERSIONS, [private, named_table]), 
 
-    {ok, Step} = application:get_env(riak_kv, n_transactions_managers),
-    State = #state{n = N,
-                   lsn = N + 1,
+    {ok, Step} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    State = #state{id = Id,
+                   lsn = Id + 1,
                    step = Step},
     {ok, State}.
 
@@ -47,8 +47,8 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({validate, Id, Snapshot, Gets, Puts, NValidations, Client}, State) ->
-    do_validate(Id, Snapshot, Gets, Puts, NValidations, Client, State);
+handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}, State) ->
+    do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
 
 handle_cast(print_state, State) ->
     io:format("~p~n", [State]),
@@ -71,18 +71,18 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_validate(
-  Id, Snapshot, Gets, Puts, NValidations, Client,
-  #state{n = N, lsn = Lsn, step = Step} = State
+  TransactionId, Snapshot, Gets, Puts, NValidations, Client,
+  #state{id = Id, lsn = Lsn, step = Step} = State
 ) ->
     ConflictsGets = check_conflicts(Gets, Snapshot),
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
     ConflictsPuts = check_conflicts(BkeyPuts, Snapshot),
     Conflicts = ConflictsGets or ConflictsPuts,
 
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [Id, Conflicts]),
+    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
-    Record = riak_kv_transactions_log:new_log_record(Lsn, {Id, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
-    riak_kv_transactions_log:append(N, Record),
+    Record = riak_kv_transactions_log:new_log_record(Lsn, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
+    riak_kv_transactions_log:append(Id, Record),
     
     if
         not Conflicts ->

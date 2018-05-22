@@ -28,8 +28,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0,
-         start_transactions_manager/1]).
+-export([start_link/0, start_transactions_manager/1]).
 
 -export([init/1]).
 
@@ -40,9 +39,9 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-start_transactions_manager(N) ->
+start_transactions_manager(Id) ->
     TransactionsManager = {riak_kv_transactions_manager,
-                           {riak_kv_transactions_manager, start_link, [N]},
+                           {riak_kv_transactions_manager, start_link, [Id]},
                            permanent, 5000, supervisor, [riak_kv_transactions_manager]},
     supervisor:start_child(?MODULE, TransactionsManager).
 

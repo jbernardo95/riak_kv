@@ -15,18 +15,18 @@
 
 -record(log_record, {lsn, content}). 
 
--record(state, {n, log}).
+-record(state, {id, log}).
 
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start_link(N) ->
-    gen_server:start_link({global, {?MODULE, N}}, ?MODULE, N, []).
+start_link(Id) ->
+    gen_server:start_link({global, {?MODULE, Id}}, ?MODULE, Id, []).
 
-append(N, #log_record{} = Record) ->
-    gen_server:cast({global, {?MODULE, N}}, {append, Record}).
+append(Id, #log_record{} = Record) ->
+    gen_server:cast({global, {?MODULE, Id}}, {append, Record}).
 
 new_log_record(Lsn, Content) ->
     #log_record{lsn = Lsn, content = Content}.
@@ -36,24 +36,32 @@ new_log_record(Lsn, Content) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init(N) ->
-    {ok, LogOptions} = application:get_env(riak_kv, transactions_log),
-    LogOptionsDict = dict:from_list(LogOptions),
-    LogName = "riak_kv_transactions_log_" ++ integer_to_list(N),
-    LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/" ++ LogName ++ "_data",
-    ok = filelib:ensure_dir(LogFile),
-    DiskLogOptions = [
-        {name, LogName},
-        {file, LogFile},
-        {repair, true},
-        {type, wrap},
-        {size, {dict:fetch(max_n_bytes, LogOptionsDict), dict:fetch(max_n_files, LogOptionsDict)}},
-        {format, internal},
-        {mode, read_write}
-    ],
-    {ok, Log} = disk_log:open(DiskLogOptions),
+init(Id) ->
+    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
 
-    State = #state{n = N, log = Log},
+    if
+        Id < NLeafTransactionsManagers -> % Is a leaf committer
+            {ok, LogOptions} = application:get_env(riak_kv, transactions_log),
+            LogOptionsDict = dict:from_list(LogOptions),
+            LogName = "riak_kv_transactions_log_" ++ integer_to_list(Id),
+            LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/" ++ LogName ++ "_data",
+            ok = filelib:ensure_dir(LogFile),
+            DiskLogOptions = [
+                              {name, LogName},
+                              {file, LogFile},
+                              {repair, true},
+                              {type, wrap},
+                              {size, {dict:fetch(max_n_bytes, LogOptionsDict), dict:fetch(max_n_files, LogOptionsDict)}},
+                              {format, internal},
+                              {mode, read_write}
+                             ],
+            {ok, Log} = disk_log:open(DiskLogOptions),
+
+            State = #state{id = Id, log = Log};
+        true ->
+            State = #state{id = Id, log = undefined}
+    end,
+
     {ok, State}.
 
 handle_call(Request, _From, State) ->
@@ -83,7 +91,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{n = N, log = Log} = State) ->
+do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{id = Id, log = Log} = State) ->
     verify_if_log_is_full(Log),
 
     disk_log:log(Log, Record),
@@ -91,9 +99,9 @@ do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{n = N, 
 
     lager:info("Record ~p was appended to the log~n", [Record]),
 
-    {Id, _Snapshot, _Gets, Puts, NValidations, Client, Conflicts} = Transaction,
+    {TransactionId, _Snapshot, _Gets, Puts, NValidations, Client, Conflicts} = Transaction,
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
-    riak_kv_transactions_committer:commit(N, Id, BkeyPuts, NValidations, Client, Conflicts, Lsn),
+    riak_kv_transactions_committer:commit(Id, TransactionId, BkeyPuts, NValidations, Client, Conflicts, Lsn),
 
     {noreply, State}.
 
