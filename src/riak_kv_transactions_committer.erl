@@ -3,8 +3,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1,
-         commit/7,
-         print_state/1]).
+         commit/7]).
 
 -export([init/1,
          handle_call/3,
@@ -27,9 +26,6 @@ start_link(Id) ->
 commit(Id, TransactionId, Puts, NValidations, Client, Conflicts, Lsn) ->
     gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Puts, NValidations, Client, Conflicts, Lsn}).
 
-print_state(Id) ->
-    gen_server:cast({global, {?MODULE, Id}}, print_state).
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -47,10 +43,6 @@ handle_call(Request, _From, State) ->
 handle_cast({commit, TransactionId, Puts, NValidations, Client, Conflicts, Lsn}, State) ->
     do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, State);
 
-handle_cast(print_state, State) ->
-    io:format("~p~n", [State]),
-    {noreply, State};
-
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
     {noreply, State}.
@@ -67,7 +59,6 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-% Root committer
 do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id = Id} = State) ->
     {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
 
@@ -93,7 +84,7 @@ root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1) ->
             ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, 1, NewVnodePuts, Lsn1})
     end,
 
-    [{ReceivedValidations, VnodePuts, Lsn}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
+    [{TransactionId, ReceivedValidations, VnodePuts, Lsn}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
             send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),

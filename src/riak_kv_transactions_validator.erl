@@ -3,8 +3,7 @@
 -behaviour(gen_server).
 
 -export([start_link/1,
-         validate/7,
-         print_state/1]).
+         validate/7]).
 
 -export([init/1,
          handle_call/3,
@@ -27,9 +26,6 @@ start_link(Id) ->
 validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
     gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}).
 
-print_state(Id) ->
-    gen_server:cast({global, {?MODULE, Id}}, print_state).
-
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -49,10 +45,6 @@ handle_call(Request, _From, State) ->
 
 handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}, State) ->
     do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
-
-handle_cast(print_state, State) ->
-    io:format("~p~n", [State]),
-    {noreply, State};
 
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
