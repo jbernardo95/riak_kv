@@ -5,7 +5,6 @@
 -export([begin_transaction/1,
          commit_transaction/1,
          get/2,
-         print_state/1,
          put/3,
          start_link/1]).
 
@@ -45,9 +44,6 @@ begin_transaction(Client) ->
 
 commit_transaction(Client) ->
     gen_server:call(Client, commit_transaction, ?DEFAULT_TIMEOUT).
-
-print_state(Client) ->
-    gen_server:cast(Client, print_state).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -163,10 +159,6 @@ handle_call(
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
-
-handle_cast(print_state, State) ->
-    io:format("~p~n", [State]),
-    {noreply, State};
 
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
