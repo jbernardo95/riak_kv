@@ -824,3 +824,10 @@
     {default, 1},
     {commented, 1}
 ]}.
+
+%% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster
+{mapping, "transactions_manager.vnode_cluster_gateway_node", "riak_kv.vnode_cluster_gateway_node", [
+    {datatype, atom},
+    {default, 'riak@127.0.0.1'},
+    {commented, 'riak@127.0.0.1'}
+]}.
