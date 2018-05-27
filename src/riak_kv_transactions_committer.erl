@@ -60,21 +60,21 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id = Id} = State) ->
-    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    Vnode = riak_core_gateway:get_bkey_vnode(Id, hd(Puts)),
 
+    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
     if
         Id < NLeafTransactionsManagers ->
-            leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn);
+            leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, Vnode);
         true ->
-            root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn)
+            root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, Vnode)
     end,
 
     {noreply, State}.
 
 % Root committer
-root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1) ->
+root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1, Vnode) ->
     % Update transaction metadata
-    Vnode = get_vnode(hd(Puts)),
     case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
         [{TransactionId, ReceivedValidations1, VnodesPuts1, Lsn2}] ->
             NewVnodePuts = dict:update(Vnode, fun(Old) -> Old ++ Puts end, Puts, VnodesPuts1),
@@ -98,10 +98,9 @@ root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1) ->
 % Leaf committer
 % Transaction only needs one validation 
 % So it can be committed right away 
-leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
+leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn, Vnode) ->
     send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),
 
-    Vnode = get_vnode(hd(Puts)),
     riak_kv_vnode:transaction_validation([Vnode], TransactionId, Puts, Conflicts, Lsn),
 
     lager:info("Transaction ~p committed~n", [TransactionId]),
@@ -113,14 +112,9 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
 % So it is sent to a committer a level up in the tree
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
-leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn) ->
+leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, _Vnode) ->
     {ok, Root} = application:get_env(riak_kv, n_leaf_transactions_managers),
     riak_kv_transactions_committer:commit(Root, TransactionId, Puts, NValidations, Client, Conflicts, Lsn).
-
-get_vnode(Bkey) ->
-    DocIdx = riak_core_util:chash_key(Bkey),
-    [Vnode] = riak_core_apl:get_apl(DocIdx, 1, riak_kv),
-    Vnode.
 
 send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client) ->
     Reply = {transaction_commit_result, TransactionId, Conflicts, Lsn},
