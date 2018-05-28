@@ -89,7 +89,7 @@ root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1, Vnode) -
         NValidations ->
             send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),
             send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, VnodePuts),
-            lager:info("Transaction ~p committed~n", [TransactionId]),
+            %lager:info("Transaction ~p committed~n", [TransactionId]),
             ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
         _ ->
             ok
@@ -103,7 +103,7 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn, Vnod
 
     riak_kv_vnode:transaction_validation([Vnode], TransactionId, Puts, Conflicts, Lsn),
 
-    lager:info("Transaction ~p committed~n", [TransactionId]),
+    %lager:info("Transaction ~p committed~n", [TransactionId]),
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 
