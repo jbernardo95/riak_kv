@@ -67,8 +67,8 @@ do_validate(
   #state{id = Id, lsn = Lsn, step = Step} = State
 ) ->
     ConflictsGets = check_conflicts(Gets, Snapshot),
-    BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
-    ConflictsPuts = check_conflicts(BkeyPuts, Snapshot),
+    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    ConflictsPuts = check_conflicts(NbkeyPuts, Snapshot),
     Conflicts = ConflictsGets or ConflictsPuts,
 
     lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
@@ -78,7 +78,7 @@ do_validate(
     
     if
         not Conflicts ->
-            lists:foreach(fun(Bkey) -> ets:insert(?LATEST_OBJECT_VERSIONS, {Bkey, Lsn}) end, BkeyPuts);
+            lists:foreach(fun(Nbkey) -> ets:insert(?LATEST_OBJECT_VERSIONS, {Nbkey, Lsn}) end, NbkeyPuts);
         true ->
             ok
     end,
@@ -91,9 +91,9 @@ check_conflicts(Objects, Snapshot) ->
 
 check_conflicts(_Objects, _Snapshot, true) -> true;
 check_conflicts([], _Snapshot, Conflict) -> Conflict;
-check_conflicts([Bkey | Rest], Snapshot, Conflict) ->
-    LatestObjectVersion = case ets:lookup(?LATEST_OBJECT_VERSIONS, Bkey) of
-                              [{Bkey, Version}] -> Version;
+check_conflicts([Nbkey | Rest], Snapshot, Conflict) ->
+    LatestObjectVersion = case ets:lookup(?LATEST_OBJECT_VERSIONS, Nbkey) of
+                              [{Nbkey, Version}] -> Version;
                               [] -> -1
                           end,
 

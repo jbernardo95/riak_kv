@@ -4,8 +4,8 @@
 
 -export([begin_transaction/1,
          commit_transaction/1,
-         get/2,
-         put/3,
+         get/4,
+         put/5,
          start_link/1]).
 
 -export([code_change/3,
@@ -16,7 +16,6 @@
 	     terminate/2]).
 
 -define(DEFAULT_TIMEOUT, 60000).
--define(DEFAULT_BUCKET, <<"default_bucket">>).
 
 -record(state, {client,
                 clock,
@@ -33,11 +32,11 @@
 start_link(Node) ->
     gen_server:start_link(?MODULE, Node, []).
 
-get(Key, Client) when is_binary(Key) ->
-    gen_server:call(Client, {get, Key}, ?DEFAULT_TIMEOUT).
+get(Node, Bucket, Key, Client) when is_binary(Bucket), is_binary(Key) ->
+    gen_server:call(Client, {get, Node, Bucket, Key}, ?DEFAULT_TIMEOUT).
 
-put(Key, Value, Client) when is_binary(Key) ->
-    gen_server:call(Client, {put, Key, Value}, ?DEFAULT_TIMEOUT).
+put(Node, Bucket, Key, Value, Client) when is_binary(Bucket), is_binary(Key) ->
+    gen_server:call(Client, {put, Node, Bucket, Key, Value}, ?DEFAULT_TIMEOUT).
 
 begin_transaction(Client) ->
     gen_server:call(Client, begin_transaction, ?DEFAULT_TIMEOUT).
@@ -50,32 +49,24 @@ commit_transaction(Client) ->
 %%%===================================================================
 
 init(Node) ->
-    case riak:client_connect(Node) of
-        {ok, Client} ->
-            State = #state{client = Client,
-                           clock = 0,
-                           in_transaction = false,
-                           id = undefined,
-                           snapshot = undefined,
-                           gets = dict:new(),
-                           puts = dict:new()},
-            {ok, State};
+    {ok, Client} = riak:client_connect(Node),
 
-        _ ->
-            {stop, error}
-    end.
+    {ok, #state{client = Client,
+                clock = 0,
+                in_transaction = false,
+                id = undefined,
+                snapshot = undefined,
+                gets = dict:new(),
+                puts = dict:new()}}.
 
 % Transactional get
 handle_call(
-  {get, Key},
+  {get, Node, Bucket, Key},
   _From,
   #state{in_transaction = true,
-         snapshot = Snapshot,
-         puts = Puts} = State
+         snapshot = Snapshot} = State
 ) ->
-    Bkey = {?DEFAULT_BUCKET, Key},
-    ReadOnly = dict:size(Puts) == 0,
-    GetResult = do_get(Bkey, State, ReadOnly),
+    GetResult = do_get(Node, Bucket, Key, State),
     NewState2 = maybe_set_snapshot(GetResult, State),
     NewState1 = maybe_record_get(GetResult, NewState2),
     Conflict = check_get_conflict(GetResult, Snapshot),
@@ -89,16 +80,14 @@ handle_call(
     end;
 
 % Single get 
-handle_call({get, Key}, _From, State) ->
-    Bkey = {?DEFAULT_BUCKET, Key},
-    GetResult = do_get(Bkey, State, false),
-
+handle_call({get, Node, Bucket, Key}, _From, State) ->
+    GetResult = do_get(Node, Bucket, Key, State),
     NewState = maybe_update_clock(GetResult, State),
     {reply, GetResult, NewState};
 
 % Transactional put 
 handle_call(
-  {put, Key, Value},
+  {put, Node, Bucket, Key, Value},
   _From,
   #state{clock = Clock,
          in_transaction = true,
@@ -108,29 +97,24 @@ handle_call(
  ) ->
     Object = case Snapshot of
                  undefined ->
-                     create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1);
+                     create_object(Node, Bucket, Key, Value, Id, Clock + 1);
                  _ ->
-                     create_object(?DEFAULT_BUCKET, Key, Value, Id, Snapshot + 1)
+                     create_object(Node, Bucket, Key, Value, Id, Snapshot + 1)
              end,
-    Bkey = riak_object:bkey(Object),
-    NewPuts = dict:store(Bkey, Object, Puts),
+    NewPuts = dict:store({Node, Bucket, Key}, Object, Puts),
     NewState = State#state{puts = NewPuts},
     {reply, ok, NewState};
 
 % Single put
 % Acts as a single operation transaction
 handle_call(
-  {put, Key, Value},
+  {put, Node, Bucket, Key, Value},
   _From,
-  #state{client = Client, clock = Clock} = State
+  #state{clock = Clock} = State
  ) ->
     Id = erlang:phash2({self(), os:timestamp()}),
-    Object = create_object(?DEFAULT_BUCKET, Key, Value, Id, Clock + 1),
-    {Conflicts, Lsn} = Client:commit_transaction(Id, Clock, [], [Object]),
-
-    Reply = commit_reply(Conflicts),
-    NewState = State#state{clock = Lsn},
-    {reply, Reply, NewState};
+    Object = create_object(Node, Bucket, Key, Value, Id, Clock + 1),
+    do_commit_transaction(Id, Clock, [], [Object], State);
 
 handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     Id = erlang:phash2({self(), os:timestamp()}),
@@ -185,54 +169,60 @@ clean_transaction_state(State) ->
 
 % Non transactional get
 do_get(
-  Bkey,
+  Node, Bucket, Key,
   #state{client = Client,
          in_transaction = false,
          snapshot = undefined,
-         clock = Clock},
-  ReadOnly
+         clock = Clock}
 ) ->
-    do_get_remote(Client, Bkey, Clock, ReadOnly);
+    do_get_remote(Node, Bucket, Key, Client, Clock, false);
 
 % Transactional get
+% Without snapshot 
 do_get(
-  Bkey,
+  Node, Bucket, Key,
   #state{client = Client,
          in_transaction = true,
          snapshot = undefined,
          clock = Clock,
-         puts = Puts},
-  _ReadOnly
+         puts = Puts}
 ) ->
-    case do_get_local(Bkey, Puts) of
+    case do_get_local(Node, Bucket, Key, Puts) of
         {ok, Object} -> {ok, Object};
-        _ -> do_get_remote(Client, Bkey, Clock, false)
+        _ ->
+            do_get_remote(Node, Bucket, Key, Client, Clock, false)
     end;
 
+% Transactional get
+% With snapshot 
 do_get(
-  Bkey,
+  Node, Bucket, Key,
   #state{client = Client,
          in_transaction = true,
          snapshot = Snapshot,
-         puts = Puts},
-  ReadOnly
+         puts = Puts}
 ) ->
-    case do_get_local(Bkey, Puts) of
+    case do_get_local(Node, Bucket, Key, Puts) of
         {ok, Object} -> {ok, Object};
-        _ -> do_get_remote(Client, Bkey, Snapshot, ReadOnly)
+        _ ->
+            ReadOnly = dict:size(Puts),
+            do_get_remote(Node, Bucket, Key, Client, Snapshot, ReadOnly)
     end.
 
-do_get_local(Bkey, Puts) ->
-    case dict:find(Bkey, Puts) of
+do_get_local(Node, Bucket, Key, Puts) ->
+    case dict:find({Node, Bucket, Key}, Puts) of
         {ok, _} = Reply -> Reply;
         error -> {error, not_found}  
     end.
 
-do_get_remote(Client, {Bucket, Key}, Snapshot, ReadOnly) ->
-    case Client:get(Bucket, Key) of
+do_get_remote(Node, Bucket, Key, {_, [ClientNode, _]}, Snapshot, ReadOnly) ->
+    proc_lib:spawn_link(ClientNode, riak_kv_node_get_fsm, start_link,
+                        [Node, Bucket, Key, self()]),
+
+    receive
         {ok, Object} ->
             select_object_content(Object, Snapshot, ReadOnly);
-        {error, _} = Error ->
+        {error, _Reason} = Error ->
             Error
     end.
 
@@ -329,7 +319,7 @@ maybe_set_snapshot({ok, Object}, #state{snapshot = undefined} = State) ->
 maybe_set_snapshot(_GetResult, State) -> State.
 
 maybe_record_get({ok, Object}, #state{gets = Gets} = State) ->
-    NewGets = dict:store(riak_object:bkey(Object), ok, Gets),
+    NewGets = dict:store(riak_object:nbkey(Object), ok, Gets),
     State#state{gets = NewGets};
 maybe_record_get(_GetResult, State) -> State.
 
@@ -349,8 +339,8 @@ commit_reply(true) -> {error, aborted};
 commit_reply(false) -> ok;
 commit_reply(_) -> error.
 
-create_object(Bucket, Key, Value, Id, TentativeVersion) ->
-    Object = riak_object:new(Bucket, Key, nil),
+create_object(Node, Bucket, Key, Value, Id, TentativeVersion) ->
+    Object = riak_object:new(Node, Bucket, Key),
     Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
     Metadata = dict:store(<<"tentative_version">>, TentativeVersion, Metadata1),
     riak_object:set_contents(Object, [{Metadata, Value}]).
@@ -364,10 +354,16 @@ do_commit_transaction(_Id, Snapshot, _Gets, [], State) ->
     NewState = NewState1#state{clock = Snapshot},
     {reply, Reply, NewState};
 
-do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = Client} = State) ->
-    {Conflicts, Lsn} = Client:commit_transaction(Id, Snapshot, Gets, Puts),
+do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = {_, [Node, _]}} = State) ->
+    proc_lib:spawn_link(Node, riak_kv_commit_transaction_fsm, start_link,
+                        [Id, Snapshot, Gets, Puts, self()]),
 
-    Reply = commit_reply(Conflicts),
-    NewState1 = clean_transaction_state(State),
-    NewState = NewState1#state{clock = Lsn},
-    {reply, Reply, NewState}.
+    receive
+        {ok, Conflicts, Lsn} ->
+            Reply = commit_reply(Conflicts),
+            NewState1 = clean_transaction_state(State),
+            NewState = NewState1#state{clock = Lsn},
+            {reply, Reply, NewState};
+        {error, _Reason} = Reply ->
+            {reply, Reply, State}
+    end.

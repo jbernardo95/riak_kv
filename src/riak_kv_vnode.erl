@@ -27,9 +27,7 @@
 -export([start_vnode/1,
          start_vnodes/1,
          commit_transaction/6,
-         commit_transaction/7,
          transaction_validation/5,
-         transaction_validation/6,
          get/3,
          get/4,
          del/3,
@@ -123,7 +121,6 @@
 -type update_hook() :: module().
 
 -record(state, {idx :: partition(),
-                hashed_idx :: non_neg_integer(),
                 mod :: module(),
                 async_put :: boolean(),
                 modstate :: term(),
@@ -248,30 +245,19 @@ test_vnode(I) ->
     riak_core_vnode:start_link(riak_kv_vnode, I, infinity).
 
 commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations) ->
-    commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations, {fsm, undefined, self()}).
-
-commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations, Sender) ->
-    Req = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NValidations),
-    riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
+    Request = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NValidations),
+    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 transaction_validation(Preflist, Id, Puts, Conflicts, Lsn) ->
-    transaction_validation(Preflist, Id, Puts, Conflicts, Lsn, {raw, undefined, self()}).
+    Request = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
+    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
-transaction_validation(Preflist, Id, Puts, Conflicts, Lsn, Sender) ->
-    Req = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
-    riak_core_vnode_master:command(Preflist, Req, Sender, riak_kv_vnode_master).
-
-get(Preflist, BKey, ReqId) ->
-    %% Assuming this function is called from a FSM process
-    %% so self() == FSM pid
-    get(Preflist, BKey, ReqId, {fsm, undefined, self()}).
+get(PreflistOrVnodePid, BKey, ReqId) ->
+    get(PreflistOrVnodePid, BKey, ReqId, {fsm, undefined, self()}).
 
 get(Preflist, BKey, ReqId, Sender) ->
-    Req = riak_kv_requests:new_get_request(sanitize_bkey(BKey), ReqId),
-    riak_core_vnode_master:command(Preflist,
-                                   Req,
-                                   Sender,
-                                   riak_kv_vnode_master).
+    Request = riak_kv_requests:new_get_request(sanitize_bkey(BKey), ReqId),
+    riak_core_vnode_master:command(Preflist, Request, Sender, riak_kv_vnode_master).
 
 del(Preflist, BKey, ReqId) ->
     Req = riak_kv_requests:new_delete_request(sanitize_bkey(BKey), ReqId),
@@ -503,9 +489,7 @@ init([Index]) ->
                 _ ->
                     false
             end,
-            HashedIdx = erlang:phash2(Index),
             State = #state{idx = Index,
-                           hashed_idx = HashedIdx,
                            async_folding = AsyncFolding,
                            mod = Mod,
                            async_put = DoAsyncPut,
@@ -522,6 +506,7 @@ init([Index]) ->
                            md_cache_size = MDCacheSize,
                            update_hook = update_hook()},
             try_set_vnode_lock_limit(Index),
+
             case AsyncFolding of
                 true ->
                     %% Create worker pool initialization tuple
@@ -1359,8 +1344,8 @@ raw_put({Idx, Node}, Key, Obj) ->
     ok.
 
 %% @private
-handle_commit_transaction_request(Req, Sender, #state{hashed_idx = HashedIdx} = State) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, HashedIdx, Sender]),
+handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     % Save puts as temporary
     Puts = riak_kv_requests:get_puts(Req),
@@ -1372,13 +1357,25 @@ handle_commit_transaction_request(Req, Sender, #state{hashed_idx = HashedIdx} = 
     NewState = lists:foldl(FoldFun, State, Puts),
 
     % Send transaction to the transactions manager for validation
-    Id = riak_kv_requests:get_id(Req),
+    TransactionsManagerId = get_transactions_manager_id(),
+    TransactionId = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     NValidations = riak_kv_requests:get_n_validations(Req),
-    riak_kv_transactions_manager:validate_and_commit(HashedIdx, Id, Snapshot, Gets, Puts, NValidations, Sender),
+    riak_kv_transactions_manager:validate_and_commit(TransactionsManagerId, TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
 
     NewState.
+
+get_transactions_manager_id() ->
+    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    Nodes = lists:sort(riak_core_node_watcher:nodes(riak_kv)),
+    {Index, _} = lists:foldl(fun(Node, {Pos, I}) ->
+                              if
+                                  node() == Node -> {I, I};
+                                  true -> {Pos, I + 1} 
+                              end
+                          end, {-1, 0}, Nodes),
+    Index rem NLeafTransactionsManagers.
 
 handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
