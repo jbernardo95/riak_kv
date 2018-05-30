@@ -25,7 +25,6 @@
 -module(riak_client).
 
 -export([new/2]).
--export([commit_transaction/5, commit_transaction/6]).
 -export([get/3,get/4,get/5]).
 -export([put/2,put/3,put/4,put/5,put/6]).
 -export([delete/3,delete/4,delete/5]).
@@ -68,22 +67,6 @@
 %% @doc Return a riak client instance.
 new(Node, ClientId) ->
     {?MODULE, [Node,ClientId]}.
-
-commit_transaction(Id, Snapshot, Gets, Puts, {?MODULE, [_Node, _ClientId]} = THIS) ->
-    commit_transaction(Id, Snapshot, Gets, Puts, [], THIS).
-
-commit_transaction(Id, Snapshot, Gets, Puts, Options, {?MODULE, [Node, _ClientId]}) ->
-    Me = self(),
-    ReqId = mk_reqid(),
-    case node() of
-        Node ->
-            riak_kv_commit_transaction_fsm:start({raw, ReqId, Me}, Id, Snapshot, Gets, Puts);
-        _ ->
-            proc_lib:spawn_link(Node, riak_kv_commit_transaction_fsm, start_link,
-                                [{raw, ReqId, Me}, Id, Snapshot, Gets, Puts])
-    end,
-    Timeout = recv_timeout(Options),
-    wait_for_reqid(ReqId, Timeout).
 
 %% @spec get(riak_object:bucket(), riak_object:key(), riak_client()) ->
 %%       {ok, riak_object:riak_object()} |

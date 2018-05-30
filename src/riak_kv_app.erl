@@ -54,6 +54,7 @@ start(_Type, _StartArgs) ->
     sidejob:new_resource(riak_kv_put_fsm_sj, sidejob_supervisor, FSM_Limit),
     sidejob:new_resource(riak_kv_get_fsm_sj, sidejob_supervisor, FSM_Limit),
     sidejob:new_resource(riak_kv_commit_transaction_fsm_sj, sidejob_supervisor, FSM_Limit),
+    sidejob:new_resource(riak_kv_node_get_fsm_sj, sidejob_supervisor, FSM_Limit),
 
     Base = [riak_core_stat:prefix(), riak_kv],
     riak_kv_exometer_sidejob:new_entry(Base ++ [put_fsm, sidejob],
@@ -62,6 +63,8 @@ start(_Type, _StartArgs) ->
                                        riak_kv_get_fsm_sj, "node_get_fsm", []),
     riak_kv_exometer_sidejob:new_entry(Base ++ [commit_transaction_fsm, sidejob],
                                        riak_kv_commit_transaction_fsm_sj, "node_commit_transaction_fsm", []),
+    riak_kv_exometer_sidejob:new_entry(Base ++ [node_get_fsm, sidejob],
+                                       riak_kv_node_get_fsm_sj, "node_node_get_fsm", []),
 
     case app_helper:get_env(riak_kv, direct_stats, false) of
         true ->

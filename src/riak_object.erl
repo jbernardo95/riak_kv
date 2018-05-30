@@ -57,6 +57,7 @@
 
 %% Opaque container for Riak objects, a.k.a. riak_object()
 -record(r_object, {
+          node :: node(),
           bucket :: bucket(),
           key :: key(),
           contents :: [#r_content{}],
@@ -89,7 +90,7 @@
 -export([vclock_encoding_method/0, vclock/1, vclock_header/1, encode_vclock/1, decode_vclock/1]).
 -export([encode_vclock/2, decode_vclock/2]).
 -export([update/5, update_value/2, update_metadata/2, bucket/1, bucket_only/1, type/1, value_count/1]).
--export([get_update_metadata/1, get_update_value/1, get_contents/1]).
+-export([get_update_metadata/1, get_update_value/1, get_contents/1, get_node/1]).
 -export([merge/2, apply_updates/1, syntactic_merge/2]).
 -export([to_json/1, from_json/1]).
 -export([index_data/1, diff_index_data/2]).
@@ -99,47 +100,50 @@
 -export([is_robject/1]).
 -export([update_last_modified/1, update_last_modified/2]).
 -export([strict_descendant/2, new_actor_epoch/2]).
--export([bkey/1]).
+-export([bkey/1, nbkey/1]).
 
 %% @doc Constructor for new riak objects.
 -spec new(Bucket::bucket(), Key::key(), Value::value()) -> riak_object().
 new({T, B}, K, V) when is_binary(T), is_binary(B), is_binary(K) ->
-    new_int({T, B}, K, V, no_initial_metadata);
+    new_int(undefined, {T, B}, K, V, no_initial_metadata);
 new(B, K, V) when is_binary(B), is_binary(K) ->
-    new_int(B, K, V, no_initial_metadata).
+    new_int(undefined, B, K, V, no_initial_metadata);
+
+new(N, B, K) when is_binary(B), is_binary(K) ->
+    new_int(N, B, K, undefined, no_initial_metadata).
 
 %% @doc Constructor for new riak objects with an initial content-type.
 -spec new(Bucket::bucket(), Key::key(), Value::value(),
           string() | riak_object_dict() | no_initial_metadata) -> riak_object().
 new({T, B}, K, V, C) when is_binary(T), is_binary(B), is_binary(K), is_list(C) ->
-    new_int({T, B}, K, V, dict:from_list([{?MD_CTYPE, C}]));
+    new_int(undefined, {T, B}, K, V, dict:from_list([{?MD_CTYPE, C}]));
 new(B, K, V, C) when is_binary(B), is_binary(K), is_list(C) ->
-    new_int(B, K, V, dict:from_list([{?MD_CTYPE, C}]));
+    new_int(undefined, B, K, V, dict:from_list([{?MD_CTYPE, C}]));
 
 %% @doc Constructor for new riak objects with an initial metadata dict.
 %%
 %% NOTE: Removed "is_tuple(MD)" guard to make Dialyzer happy.  The previous clause
 %%       has a guard for string(), so this clause is OK without the guard.
 new({T, B}, K, V, MD) when is_binary(T), is_binary(B), is_binary(K) ->
-    new_int({T, B}, K, V, MD);
+    new_int(undefined, {T, B}, K, V, MD);
 new(B, K, V, MD) when is_binary(B), is_binary(K) ->
-    new_int(B, K, V, MD).
+    new_int(undefined, B, K, V, MD).
 
 %% internal version after all validation has been done
-new_int(B, K, V, MD) ->
+new_int(N, B, K, V, MD) ->
     case size(K) > ?MAX_KEY_SIZE of
         true ->
             throw({error,key_too_large});
         false ->
             case MD of
                 no_initial_metadata ->
-                    Contents = [#r_content{metadata=dict:new(), value=V}],
-                    #r_object{bucket=B,key=K,
-                              contents=Contents,vclock=vclock:fresh()};
+                    Contents = [#r_content{metadata = dict:new(), value = V}],
+                    #r_object{node = N, bucket = B, key = K,
+                              contents = Contents, vclock = vclock:fresh()};
                 _ ->
-                    Contents = [#r_content{metadata=MD, value=V}],
-                    #r_object{bucket=B,key=K,updatemetadata=MD,
-                              contents=Contents,vclock=vclock:fresh()}
+                    Contents = [#r_content{metadata = MD, value = V}],
+                    #r_object{node = N, bucket = B, key = K, updatemetadata = MD,
+                              contents = Contents, vclock = vclock:fresh()}
             end
     end.
 
@@ -692,6 +696,9 @@ get_contents(#r_object{contents=Contents}) ->
     [{Content#r_content.metadata, Content#r_content.value} ||
         Content <- Contents].
 
+-spec get_node(riak_object()) -> node().
+get_node(#r_object{node = Node}) -> Node.
+
 %% @doc  Assert that this riak_object has no siblings and return its associated
 %%       metadata.  This function will fail with a badmatch error if the
 %%       object has siblings (value_count() > 1).
@@ -818,6 +825,8 @@ new_actor_epoch(Object=#r_object{vclock=VC}, ClientId) ->
 
 -spec bkey(riak_object()) -> bkey().
 bkey(#r_object{bucket = Bucket, key = Key}) -> {Bucket, Key}.
+
+nbkey(#r_object{node = Node, bucket = Bucket, key = Key}) -> {Node, Bucket, Key}.
 
 %% @doc  Increment the entry for ClientId in O's vclock.
 -spec increment_vclock(riak_object(), vclock:vclock_node()) -> riak_object().
