@@ -37,31 +37,23 @@ new_log_record(Lsn, Content) ->
 %%%===================================================================
 
 init(Id) ->
-    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    {ok, LogOptions} = application:get_env(riak_kv, transactions_log),
+    LogOptionsDict = dict:from_list(LogOptions),
+    LogName = "riak_kv_transactions_log_" ++ integer_to_list(Id),
+    LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/" ++ LogName ++ "_data",
+    ok = filelib:ensure_dir(LogFile),
+    DiskLogOptions = [
+                      {name, LogName},
+                      {file, LogFile},
+                      {repair, true},
+                      {type, wrap},
+                      {size, {dict:fetch(max_n_bytes, LogOptionsDict), dict:fetch(max_n_files, LogOptionsDict)}},
+                      {format, internal},
+                      {mode, read_write}
+                     ],
+    {ok, Log} = disk_log:open(DiskLogOptions),
 
-    if
-        Id < NLeafTransactionsManagers -> % Is a leaf committer
-            {ok, LogOptions} = application:get_env(riak_kv, transactions_log),
-            LogOptionsDict = dict:from_list(LogOptions),
-            LogName = "riak_kv_transactions_log_" ++ integer_to_list(Id),
-            LogFile = dict:fetch(data_path, LogOptionsDict) ++ "/" ++ LogName ++ "_data",
-            ok = filelib:ensure_dir(LogFile),
-            DiskLogOptions = [
-                              {name, LogName},
-                              {file, LogFile},
-                              {repair, true},
-                              {type, wrap},
-                              {size, {dict:fetch(max_n_bytes, LogOptionsDict), dict:fetch(max_n_files, LogOptionsDict)}},
-                              {format, internal},
-                              {mode, read_write}
-                             ],
-            {ok, Log} = disk_log:open(DiskLogOptions),
-
-            State = #state{id = Id, log = Log};
-        true ->
-            State = #state{id = Id, log = undefined}
-    end,
-
+    State = #state{id = Id, log = Log},
     {ok, State}.
 
 handle_call(Request, _From, State) ->

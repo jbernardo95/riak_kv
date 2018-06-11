@@ -33,7 +33,8 @@ validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
 init(Id) ->
     ets:new(?LATEST_OBJECT_VERSIONS, [private, named_table]), 
 
-    {ok, Step} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
+    Step = case (NTransactionsManagers - 1) of 0 -> 1; S -> S end,
     State = #state{id = Id,
                    lsn = Id + 1,
                    step = Step},

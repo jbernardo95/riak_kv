@@ -69,9 +69,10 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id = Id} = State) ->
-    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
+    Root = NTransactionsManagers - 1,
     if
-        Id < NLeafTransactionsManagers ->
+        Id < Root ->
             leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn);
         true ->
             root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn)
@@ -132,7 +133,8 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
 leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn) ->
-    {ok, Root} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
+    Root = NTransactionsManagers - 1,
     riak_kv_transactions_committer:commit(Root, TransactionId, Puts, NValidations, Client, Conflicts, Lsn).
 
 send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client) ->

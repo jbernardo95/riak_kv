@@ -1367,7 +1367,8 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     NewState.
 
 get_transactions_manager_id() ->
-    {ok, NLeafTransactionsManagers} = application:get_env(riak_kv, n_leaf_transactions_managers),
+    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
+    NLeafTransactionsManagers = case (NTransactionsManagers - 1) of 0 -> 1; S -> S end,
     Nodes = lists:sort(riak_core_node_watcher:nodes(riak_kv)),
     {Index, _} = lists:foldl(fun(Node, {Pos, I}) ->
                               if

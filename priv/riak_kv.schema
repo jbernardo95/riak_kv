@@ -819,7 +819,7 @@
 ]}.
 
 %% @doc Specifies the number of leaf transaction managers
-{mapping, "transactions_manager.n_leafs", "riak_kv.n_leaf_transactions_managers", [
+{mapping, "transactions_manager.n", "riak_kv.n_transactions_managers", [
     {datatype, integer},
     {default, 1},
     {commented, 1}
