@@ -72,7 +72,7 @@ do_validate(
     ConflictsPuts = check_conflicts(NbkeyPuts, Snapshot),
     Conflicts = ConflictsGets or ConflictsPuts,
 
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
     Record = riak_kv_transactions_log:new_log_record(Lsn, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
     riak_kv_transactions_log:append(Id, Record),

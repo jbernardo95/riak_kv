@@ -106,7 +106,7 @@ root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1) ->
         NValidations ->
             send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),
             send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodePuts),
-            lager:info("Transaction ~p committed~n", [TransactionId]),
+            %lager:info("Transaction ~p committed~n", [TransactionId]),
             ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
         _ ->
             ok
@@ -123,7 +123,7 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
     riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn),
 
-    lager:info("Transaction ~p committed~n", [TransactionId]),
+    %lager:info("Transaction ~p committed~n", [TransactionId]),
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 
