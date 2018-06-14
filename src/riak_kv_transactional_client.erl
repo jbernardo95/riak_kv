@@ -68,7 +68,7 @@ handle_call(
 ) ->
     GetResult = do_get(Node, Bucket, Key, State),
     NewState2 = maybe_set_snapshot(GetResult, State),
-    NewState1 = maybe_record_get(GetResult, NewState2),
+    NewState1 = maybe_cache_get(GetResult, NewState2),
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
@@ -135,7 +135,7 @@ handle_call(
          gets = GetsDict,
          puts = PutsDict} = State
 ) ->
-    Gets = dict:fetch_keys(GetsDict),
+    Gets = dict:fold(fun(_, Value, Acc) -> [Value | Acc] end, [], GetsDict),
     Puts = dict:fold(fun(_, Value, Acc) -> [Value | Acc] end, [], PutsDict),
     do_commit_transaction(Id, Snapshot, Gets, Puts, State);
 
@@ -184,10 +184,9 @@ do_get(
   #state{client = Client,
          in_transaction = true,
          snapshot = undefined,
-         clock = Clock,
-         puts = Puts}
+         clock = Clock} = State
 ) ->
-    case do_get_local(Node, Bucket, Key, Puts) of
+    case do_get_local(Node, Bucket, Key, State) of
         {ok, Object} -> {ok, Object};
         _ ->
             do_get_remote(Node, Bucket, Key, Client, Clock, false)
@@ -200,24 +199,27 @@ do_get(
   #state{client = Client,
          in_transaction = true,
          snapshot = Snapshot,
-         puts = Puts}
+         puts = Puts} = State
 ) ->
-    case do_get_local(Node, Bucket, Key, Puts) of
+    case do_get_local(Node, Bucket, Key, State) of
         {ok, Object} -> {ok, Object};
         _ ->
-            ReadOnly = dict:size(Puts),
+            ReadOnly = dict:size(Puts) == 0,
             do_get_remote(Node, Bucket, Key, Client, Snapshot, ReadOnly)
     end.
 
-do_get_local(Node, Bucket, Key, Puts) ->
+do_get_local(Node, Bucket, Key, #state{gets = Gets, puts = Puts}) ->
     case dict:find({Node, Bucket, Key}, Puts) of
         {ok, _} = Reply -> Reply;
-        error -> {error, not_found}  
+        error ->
+            case dict:find({Node, Bucket, Key}, Gets) of
+                {ok, _} = Reply -> Reply;
+                error -> {error, not_found}  
+            end
     end.
 
 do_get_remote(Node, Bucket, Key, {_, [ClientNode, _]}, Snapshot, ReadOnly) ->
-    proc_lib:spawn_link(ClientNode, riak_kv_node_get_fsm, start_link,
-                        [Node, Bucket, Key, self()]),
+    proc_lib:spawn_link(ClientNode, riak_kv_node_get_fsm, start_link, [Node, Bucket, Key, self()]),
 
     receive
         {ok, Object} ->
@@ -318,10 +320,10 @@ maybe_set_snapshot({ok, Object}, #state{snapshot = undefined} = State) ->
     end;
 maybe_set_snapshot(_GetResult, State) -> State.
 
-maybe_record_get({ok, Object}, #state{gets = Gets} = State) ->
-    NewGets = dict:store(riak_object:nbkey(Object), ok, Gets),
+maybe_cache_get({ok, Object}, #state{gets = Gets} = State) ->
+    NewGets = dict:store(riak_object:nbkey(Object), Object, Gets),
     State#state{gets = NewGets};
-maybe_record_get(_GetResult, State) -> State.
+maybe_cache_get(_GetResult, State) -> State.
 
 maybe_update_clock({ok, Object}, State) ->
     Version = riak_object:get_version(Object),

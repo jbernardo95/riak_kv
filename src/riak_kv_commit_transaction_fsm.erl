@@ -19,6 +19,7 @@
                 gets,
                 puts,
                 client,
+                node_gets, 
                 node_puts, 
                 timerref,
                 conflicts,
@@ -53,6 +54,7 @@ init([Id, Snapshot, Gets, Puts, Client]) ->
                        gets = Gets,
                        puts = Puts,
                        client = Client,
+                       node_gets = undefined,
                        node_puts = undefined,
                        timerref = undefined,
                        conflicts = undefined,
@@ -60,7 +62,7 @@ init([Id, Snapshot, Gets, Puts, Client]) ->
                        timeout = false},
     {ok, prepare, StateData, 0}.
 
-prepare(timeout, #state{puts = Puts} = StateData) ->
+prepare(timeout, #state{gets = Gets, puts = Puts} = StateData) ->
     FoldFun = fun(Object, NodePuts1) ->
                       Node = riak_object:get_node(Object),
                       case dict:find(Node, NodePuts1) of
@@ -68,25 +70,34 @@ prepare(timeout, #state{puts = Puts} = StateData) ->
                           error -> dict:store(Node, [Object], NodePuts1)
                       end
               end,
+    NodeGets = lists:foldl(FoldFun, dict:new(), Gets),
     NodePuts = lists:foldl(FoldFun, dict:new(), Puts),
 
-    NewStateData = StateData#state{node_puts = NodePuts},
+    NewStateData = StateData#state{node_gets = NodeGets, node_puts = NodePuts},
     {next_state, execute, NewStateData, 0}.
 
 execute(
   timeout,
   #state{id = Id,
          snapshot = Snapshot,
-         gets = Gets,
+         node_gets = NodeGets,
          node_puts = NodePuts} = StateData
 ) ->
-    Nodes = dict:fetch_keys(NodePuts),
+    Nodes = lists:usort(dict:fetch_keys(NodeGets) ++ dict:fetch_keys(NodePuts)),
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     {_RingSize, IdxNodes} = element(4, Ring), 
     NValidations = length(Nodes),
     lists:foreach(fun(Node) ->
                           Vnode = lists:keyfind(Node, 2, IdxNodes),
-                          Puts = dict:fetch(Node, NodePuts),
+                          Gets = case dict:find(Node, NodeGets) of
+                                     {ok, Gets1} ->
+                                         lists:map(fun riak_object:nbkey/1, Gets1);
+                                     error -> []
+                                 end,
+                          Puts = case dict:find(Node, NodePuts) of
+                                     {ok, Puts1} -> Puts1;
+                                     error -> []
+                                 end,
                           riak_kv_vnode:commit_transaction(Vnode, Id, Snapshot, Gets, Puts, NValidations)
                   end, Nodes),
 

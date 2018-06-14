@@ -69,6 +69,8 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id = Id} = State) ->
+    lager:info("Received transaction ~p validation request~n", [TransactionId]),
+
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
     if
@@ -82,34 +84,43 @@ do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id =
 
 do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
     {ok, Ring} = rpc:call(VnodeClusterGatewayNode, riak_core_ring_manager, get_raw_ring, []),
-    {_RingSize, Vnodes} = element(4, Ring), 
+    {_RingSize, Vnodes1} = element(4, Ring),
+    Vnodes = lists:usort(fun({_, A}, {_, B}) -> A =< B end, Vnodes1),
     ets:insert(?RIAK_RING, Vnodes),
     {noreply, State}.
 
 % Root committer
-root_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn1) ->
-    Node = riak_object:get_node(hd(Puts)),
+root_commit(TransactionId, Puts, NValidations, Client, Conflicts1, Lsn1) ->
+    update_transactions_metadata(TransactionId, Puts, Conflicts1, Lsn1),
 
-    % Update transaction metadata
-    BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
-    case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
-        [{TransactionId, ReceivedValidations1, NodesPuts1, Lsn2}] ->
-            NewNodePuts = dict:update(Node, fun(Old) -> Old ++ BkeyPuts end, BkeyPuts, NodesPuts1),
-            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, ReceivedValidations1 + 1, NewNodePuts, max(Lsn1, Lsn2)});
-        [] ->
-            NewNodePuts = dict:store(Node, BkeyPuts, dict:new()),
-            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, 1, NewNodePuts, Lsn1})
-    end,
-
-    [{TransactionId, ReceivedValidations, NodePuts, Lsn}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
+    [{TransactionId, ReceivedValidations, NodesPuts, Conflicts, Lsn}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
             send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),
-            send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodePuts),
+            send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodesPuts),
             lager:info("Transaction ~p committed~n", [TransactionId]),
             ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
         _ ->
             ok
+    end.
+
+update_transactions_metadata(TransactionId, [], Conflicts1, Lsn1) ->
+    case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
+        [{TransactionId, ReceivedValidations, NodesPuts, Conflicts2, Lsn2}] ->
+            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, ReceivedValidations + 1, NodesPuts, (Conflicts1 or Conflicts2), max(Lsn1, Lsn2)});
+        [] ->
+            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, 1, dict:new(), Conflicts1, Lsn1})
+    end;
+update_transactions_metadata(TransactionId, Puts, Conflicts1, Lsn1) ->
+    Node = riak_object:get_node(hd(Puts)),
+    BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
+    case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
+        [{TransactionId, ReceivedValidations, NodesPuts1, Conflicts2, Lsn2}] ->
+            NewNodesPuts = dict:update(Node, fun(Old) -> Old ++ BkeyPuts end, BkeyPuts, NodesPuts1),
+            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, ReceivedValidations + 1, NewNodesPuts, (Conflicts1 or Conflicts2), max(Lsn1, Lsn2)});
+        [] ->
+            NewNodesPuts = dict:store(Node, BkeyPuts, dict:new()),
+            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, 1, NewNodesPuts, Conflicts1, Lsn1})
     end.
 
 % Leaf committer
@@ -133,6 +144,8 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
 leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn) ->
+    lager:info("Propagating transaction ~p validation request up the tree~n", [TransactionId]),
+
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
     riak_kv_transactions_committer:commit(Root, TransactionId, Puts, NValidations, Client, Conflicts, Lsn).
@@ -141,10 +154,10 @@ send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client) ->
     Reply = {transaction_commit_result, TransactionId, Conflicts, Lsn},
     riak_core_vnode:reply(Client, Reply).
 
-send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodePuts) ->
-    Nodes = dict:fetch_keys(NodePuts),
+send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodesPuts) ->
+    Nodes = dict:fetch_keys(NodesPuts),
     lists:foreach(fun(Node) ->
                           [Vnode] = ets:lookup(?RIAK_RING, Node),
-                          Puts = dict:fetch(Node, NodePuts),
+                          Puts = dict:fetch(Node, NodesPuts),
                           riak_kv_vnode:transaction_validation(Vnode, TransactionId, Puts, Conflicts, Lsn)
                   end, Nodes).
