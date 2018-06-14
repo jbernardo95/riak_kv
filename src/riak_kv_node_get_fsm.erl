@@ -64,9 +64,14 @@ execute(
     {next_state, wait_for_vnode, NewStateData}.
 
 wait_for_vnode(
-  {r, Retval, _Idx, node_get},
-  StateData
+  {r, Retval1, _Idx, node_get},
+  #state{node = Node} = StateData
 ) ->
+    Retval = case Retval1 of
+                 {ok, Object} -> {ok, riak_object:set_node(Object, Node)};
+                 _ -> Retval1
+             end,
+
     NewStateData = StateData#state{retval = Retval},
     {next_state, respond_to_client, NewStateData, 0};
 
