@@ -69,7 +69,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn, #state{id = Id} = State) ->
-    lager:info("Received transaction ~p validation request~n", [TransactionId]),
+    %lager:info("Received transaction ~p validation request~n", [TransactionId]),
 
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
@@ -98,7 +98,7 @@ root_commit(TransactionId, Puts, NValidations, Client, Conflicts1, Lsn1) ->
         NValidations ->
             send_validation_result_to_client(TransactionId, Conflicts, Lsn, Client),
             send_validation_result_to_vnodes(TransactionId, Conflicts, Lsn, NodesPuts),
-            lager:info("Transaction ~p committed~n", [TransactionId]),
+            %lager:info("Transaction ~p committed~n", [TransactionId]),
             ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
         _ ->
             ok
@@ -134,7 +134,7 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
     BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
     riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn),
 
-    lager:info("Transaction ~p committed~n", [TransactionId]),
+    %lager:info("Transaction ~p committed~n", [TransactionId]),
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 
@@ -144,7 +144,7 @@ leaf_commit(TransactionId, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
 leaf_commit(TransactionId, Puts, NValidations, Client, Conflicts, Lsn) ->
-    lager:info("Propagating transaction ~p validation request up the tree~n", [TransactionId]),
+    %lager:info("Propagating transaction ~p validation request up the tree~n", [TransactionId]),
 
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
