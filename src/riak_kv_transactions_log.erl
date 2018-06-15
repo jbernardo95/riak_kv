@@ -91,8 +91,8 @@ do_append(#log_record{lsn = Lsn, content = Transaction} = Record, #state{id = Id
 
     lager:info("Record ~p was appended to the log~n", [Record]),
 
-    {TransactionId, _Snapshot, _Gets, Puts, NValidations, Client, Conflicts} = Transaction,
-    riak_kv_transactions_committer:commit(Id, TransactionId, Puts, NValidations, Client, Conflicts, Lsn),
+    {TransactionId, _Snapshot, Gets, Puts, NValidations, Client, Conflicts} = Transaction,
+    riak_kv_transactions_committer:commit(Id, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts),
 
     {noreply, State}.
 
