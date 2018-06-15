@@ -76,7 +76,7 @@ do_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
   #state{id = Id} = State
 ) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+    %lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
@@ -96,10 +96,10 @@ leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
   #state{id = Id, lsn = Lsn, step = Step} = State
  ) ->
-    lager:info("Leaf validation in progress...~n", []),
+    %lager:info("Leaf validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
     if
         not Conflicts ->
@@ -134,10 +134,10 @@ root_validate(
     [{TransactionId, Snapshot, Gets, Puts, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            lager:info("Root validation in progress...~n", []),
+            %lager:info("Root validation in progress...~n", []),
             NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
             Conflicts = check_conflicts(Gets, Puts, Snapshot),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+            %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
             riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts),
 
