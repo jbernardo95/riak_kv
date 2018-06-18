@@ -4,6 +4,7 @@
 
 -export([start_link/1,
          validate/7,
+         validate/8,
          update_latest_object_versions/3]).
 
 -export([init/1,
@@ -26,7 +27,10 @@ start_link(Id) ->
     gen_server:start_link({global, {?MODULE, Id}}, ?MODULE, Id, []).
 
 validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
-    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}).
+    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false}).
+
+validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts) ->
+    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}).
 
 update_latest_object_versions(Id, Objects, Versions) ->
     gen_server:cast({global, {?MODULE, Id}}, {update_latest_object_versions, Objects, Versions}).
@@ -50,8 +54,8 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}, State) ->
-    do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
+handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}, State) ->
+    do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, State);
 
 handle_cast({update_latest_object_versions, Objects, Version}, State) ->
     do_update_latest_object_versions(Objects, Version, State);
@@ -73,7 +77,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_validate(
-  TransactionId, Snapshot, Gets, Puts, NValidations, Client,
+  TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts,
   #state{id = Id} = State
 ) ->
     lager:info("Received transaction ~p for validation~n", [TransactionId]),
@@ -84,7 +88,7 @@ do_validate(
         Id < Root ->
             leaf_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
         true ->
-            root_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State)
+            root_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, State)
     end.
 
 do_update_latest_object_versions(Objects, Version, State) ->
@@ -120,40 +124,51 @@ leaf_validate(
 
 % Validates the transaction once all the info has arrived from its children
 root_validate(
-  TransactionId, Snapshot1, Gets1, Puts1, NValidations, Client,
+  TransactionId, Snapshot1, Gets1, Puts1, NValidations, Client, Conflicts1,
   #state{id = Id} = State
 ) ->
     % Update transaction metadata
     case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
-        [{TransactionId, Snapshot2, Gets2, Puts2, ReceivedValidations1}] ->
-            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, max(Snapshot1, Snapshot2), Gets1 ++ Gets2, Puts1 ++ Puts2, ReceivedValidations1 + 1});
+        [{TransactionId, Snapshot2, Gets2, Puts2, Conflicts2, ReceivedValidations1}] ->
+            ets:insert(?RUNNING_TRANSACTIONS, {
+                TransactionId,
+                max(Snapshot1, Snapshot2),
+                Gets1 ++ Gets2,
+                Puts1 ++ Puts2,
+                Conflicts1 or Conflicts2,
+                ReceivedValidations1 + 1
+            });
         [] ->
-            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, Snapshot1, Gets1, Puts1, 1})
+            ets:insert(?RUNNING_TRANSACTIONS, {TransactionId, Snapshot1, Gets1, Puts1, Conflicts1, 1})
     end,
 
-    [{TransactionId, Snapshot, Gets, Puts, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
+    [{TransactionId, Snapshot, Gets, Puts, Conflicts, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            lager:info("Root validation in progress...~n", []),
-            NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-            Conflicts = check_conflicts(Gets, Puts, Snapshot),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
-
-            riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts),
-
-            if
-                not Conflicts ->
-                    do_update_latest_object_versions2(NbkeyPuts, Snapshot);
-                true ->
-                    ok
-            end,
-
-            ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
+            do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts);
         _ ->
             ok
     end,
 
     {noreply, State}.
+
+do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts) ->
+    riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, false),
+    ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
+do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts) ->
+    lager:info("Root validation in progress...~n", []),
+    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
+    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+
+    riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, true),
+
+    if
+        not Conflicts -> do_update_latest_object_versions2(NbkeyPuts, Snapshot);
+        true -> ok
+    end,
+
+    ets:delete(?RUNNING_TRANSACTIONS, TransactionId).
 
 do_update_latest_object_versions2(Nbkeys, Version) ->
     lists:foreach(

@@ -4,7 +4,8 @@
 
 -export([start_link/1,
          connect_to_vnodes_cluster/2,
-         commit/8]).
+         commit/8,
+         commit/9]).
 
 -export([init/1,
          handle_call/3,
@@ -28,7 +29,10 @@ connect_to_vnodes_cluster(Id, VnodeClusterGatewayNode) ->
     gen_server:cast({global, {?MODULE, Id}}, {connect_to_vnodes_cluster, VnodeClusterGatewayNode}).
 
 commit(Id, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
-    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts}).
+    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, true}).
+
+commit(Id, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient) ->
+    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -44,8 +48,8 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts}, State) ->
-    do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, State);
+handle_cast({commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient}, State) ->
+    do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient, State);
 
 handle_cast({connect_to_vnodes_cluster, VnodeClusterGatewayNode}, State) ->
     do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State);
@@ -66,7 +70,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, #state{id = Id} = State) ->
+do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient, #state{id = Id} = State) ->
     lager:info("Received transaction ~p to commit~n", [TransactionId]),
 
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
@@ -75,7 +79,7 @@ do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, #stat
         Id < Root ->
             leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts);
         true ->
-            root_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts)
+            root_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient)
     end,
 
     {noreply, State}.
@@ -105,19 +109,24 @@ leaf_commit(TransactionId, Lsn, _Gets, Puts, 1 = _NValidations, Client, Conflict
 % So it is sent to a transactions manager a level up in the tree
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
-leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, _Conflicts) ->
+leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
     lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
 
-    % TODO
-    % In the future if the transaction has conflicts tell the client right away
+    if
+        Conflicts -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
+        true -> ok
+    end,
 
     {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
     Root = NTransactionsManagers - 1,
     riak_kv_transactions_validator:validate(Root, TransactionId, Lsn, Gets, Puts, NValidations, Client).
 
 % Root committer
-root_commit(TransactionId, Lsn, _Gets, Puts, _NValidations, Client, Conflicts) ->
-    send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts),
+root_commit(TransactionId, Lsn, _Gets, Puts, _NValidations, Client, Conflicts, InformClient) ->
+    if
+        InformClient -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
+        true -> ok
+    end,
     send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
     lager:info("Transaction ~p committed~n", [TransactionId]).
 
