@@ -1357,26 +1357,13 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
     NewState = lists:foldl(FoldFun, State, Puts),
 
     % Send transaction to the transactions manager for validation
-    TransactionsManagerId = get_transactions_manager_id(),
     TransactionId = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     NValidations = riak_kv_requests:get_n_validations(Req),
-    riak_kv_transactions_manager:validate_and_commit(TransactionsManagerId, TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
+    riak_kv_transactions_manager:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
 
     NewState.
-
-get_transactions_manager_id() ->
-    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    NLeafTransactionsManagers = case (NTransactionsManagers - 1) of 0 -> 1; S -> S end,
-    Nodes = lists:sort(riak_core_node_watcher:nodes(riak_kv)),
-    {Index, _} = lists:foldl(fun(Node, {Pos, I}) ->
-                              if
-                                  node() == Node -> {I, I};
-                                  true -> {Pos, I + 1} 
-                              end
-                          end, {-1, 0}, Nodes),
-    Index rem NLeafTransactionsManagers.
 
 handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),

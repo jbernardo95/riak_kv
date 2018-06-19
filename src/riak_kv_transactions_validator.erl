@@ -43,8 +43,8 @@ init(Id) ->
     ets:new(?LATEST_OBJECT_VERSIONS, [private, named_table]), 
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
-    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    Step = case (NTransactionsManagers - 1) of 0 -> 1; S -> S end,
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Step = case (NNodes - 1) of 0 -> 1; S -> S end,
     State = #state{id = Id,
                    lsn = Id + 1,
                    step = Step},
@@ -82,8 +82,8 @@ do_validate(
 ) ->
     lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
-    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    Root = NTransactionsManagers - 1,
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Root = NNodes - 1,
     if
         Id < Root ->
             leaf_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
@@ -109,8 +109,8 @@ leaf_validate(
         not Conflicts ->
             do_update_latest_object_versions2(NbkeyPuts, Lsn),
 
-            {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-            Root = NTransactionsManagers - 1,
+            {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+            Root = NNodes - 1,
             riak_kv_transactions_validator:update_latest_object_versions(Root, NbkeyPuts, Lsn);
         true ->
             ok

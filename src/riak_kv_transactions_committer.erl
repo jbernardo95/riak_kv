@@ -73,8 +73,8 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient, #state{id = Id} = State) ->
     lager:info("Received transaction ~p to commit~n", [TransactionId]),
 
-    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    Root = NTransactionsManagers - 1,
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Root = NNodes - 1,
     if
         Id < Root ->
             leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts);
@@ -117,8 +117,8 @@ leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
         true -> ok
     end,
 
-    {ok, NTransactionsManagers} = application:get_env(riak_kv, n_transactions_managers),
-    Root = NTransactionsManagers - 1,
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Root = NNodes - 1,
     riak_kv_transactions_validator:validate(Root, TransactionId, Lsn, Gets, Puts, NValidations, Client).
 
 % Root committer

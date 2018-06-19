@@ -790,6 +790,27 @@
     {commented, enabled}
 ]}.
 
+%% @doc Specifies the backend used by the transactions manager
+{mapping, "transactions_manager.backend", "riak_kv.transactions_manager_backend", [
+    {datatype, atom},
+    {default, tree},
+    {commented, tree}
+]}.
+
+%% @doc Specifies the number of nodes of the transaction managers tree
+{mapping, "transactions_manager.tree.n_nodes", "riak_kv.transactions_manager_tree_n_nodes", [
+    {datatype, integer},
+    {default, 3},
+    {commented, 3}
+]}.
+
+%% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster
+{mapping, "transactions_manager.vnode_cluster_gateway_node", "riak_kv.vnode_cluster_gateway_node", [
+    {datatype, atom},
+    {default, 'riak@127.0.0.1'},
+    {commented, 'riak@127.0.0.1'}
+]}.
+
 %% @doc Specifies the maximum number of versions that can be stored per object
 {mapping, "object.versions.maximum", "riak_kv.maximum_object_versions", [
     {datatype, integer},
@@ -816,18 +837,4 @@
     {datatype, integer},
     {default, 10},
     {commented, 10}
-]}.
-
-%% @doc Specifies the number of leaf transaction managers
-{mapping, "transactions_manager.n", "riak_kv.n_transactions_managers", [
-    {datatype, integer},
-    {default, 1},
-    {commented, 1}
-]}.
-
-%% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster
-{mapping, "transactions_manager.vnode_cluster_gateway_node", "riak_kv.vnode_cluster_gateway_node", [
-    {datatype, atom},
-    {default, 'riak@127.0.0.1'},
-    {commented, 'riak@127.0.0.1'}
 ]}.
