@@ -4,8 +4,8 @@
 
 -export([start_link/1,
          connect_to_vnodes_cluster/2,
-         commit/8,
-         commit/9]).
+         commit/9,
+         commit/10]).
 
 -export([init/1,
          handle_call/3,
@@ -28,11 +28,11 @@ start_link(Id) ->
 connect_to_vnodes_cluster(Id, VnodeClusterGatewayNode) ->
     gen_server:cast({global, {?MODULE, Id}}, {connect_to_vnodes_cluster, VnodeClusterGatewayNode}).
 
-commit(Id, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
-    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, true}).
+commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
+    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true}).
 
-commit(Id, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient) ->
-    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient}).
+commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient) ->
+    gen_server:cast({global, {?MODULE, Id}}, {commit, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -48,11 +48,11 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({commit, TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient}, State) ->
-    do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient, State);
-
 handle_cast({connect_to_vnodes_cluster, VnodeClusterGatewayNode}, State) ->
     do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State);
+
+handle_cast({commit, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient}, State) ->
+    do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient, State);
 
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
@@ -70,20 +70,6 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-do_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient, #state{id = Id} = State) ->
-    lager:info("Received transaction ~p to commit~n", [TransactionId]),
-
-    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
-    Root = NNodes - 1,
-    if
-        Id < Root ->
-            leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts);
-        true ->
-            root_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts, InformClient)
-    end,
-
-    {noreply, State}.
-
 do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
     {ok, Ring} = rpc:call(VnodeClusterGatewayNode, riak_core_ring_manager, get_raw_ring, []),
     {_RingSize, Vnodes1} = element(4, Ring),
@@ -91,10 +77,24 @@ do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
     ets:insert(?RIAK_RING, Vnodes),
     {noreply, State}.
 
+do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient, #state{id = Id} = State) ->
+    lager:info("Received transaction ~p to commit~n", [TransactionId]),
+
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Root = NNodes - 1,
+    if
+        Id < Root ->
+            leaf_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
+        true ->
+            root_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient)
+    end,
+
+    {noreply, State}.
+
 % Leaf committer
 % Transaction only needs one validation 
 % So it can be committed right away 
-leaf_commit(TransactionId, Lsn, _Gets, Puts, 1 = _NValidations, Client, Conflicts) ->
+leaf_commit(TransactionId, _Snapshot, _Gets, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
     send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts),
 
     Node = riak_object:get_node(hd(Puts)),
@@ -109,7 +109,7 @@ leaf_commit(TransactionId, Lsn, _Gets, Puts, 1 = _NValidations, Client, Conflict
 % So it is sent to a transactions manager a level up in the tree
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
-leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
+leaf_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
     lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
 
     if
@@ -119,10 +119,10 @@ leaf_commit(TransactionId, Lsn, Gets, Puts, NValidations, Client, Conflicts) ->
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Root = NNodes - 1,
-    riak_kv_transactions_validator:validate(Root, TransactionId, Lsn, Gets, Puts, NValidations, Client).
+    riak_kv_transactions_validator:validate(Root, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn).
 
 % Root committer
-root_commit(TransactionId, Lsn, _Gets, Puts, _NValidations, Client, Conflicts, InformClient) ->
+root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Conflicts, Lsn, InformClient) ->
     if
         InformClient -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
         true -> ok
