@@ -102,15 +102,20 @@ leaf_validate(
 ) ->
     Lsn = generate_lsn(Snapshot, NextLsn, Step),
 
-    lager:info("Leaf validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-    Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
+    if
+        BlindWrite ->
+            Conflicts = false;
+        true ->
+            lager:info("Leaf validation in progress...~n", []),
+            Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
+            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
+    end,
 
     if
         not Conflicts ->
             do_update_object_versions2(NbkeyPuts, Lsn, TransactionId),
-
             {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
             Root = NNodes - 1,
             riak_kv_transactions_validator:update_object_versions(Root, NbkeyPuts, Lsn, TransactionId);
