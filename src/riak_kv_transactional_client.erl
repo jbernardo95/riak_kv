@@ -312,10 +312,10 @@ do_select_object_content(Object, SelectFun) ->
             end
     end.
 
-maybe_set_snapshot({ok, Object}, #state{snapshot = undefined} = State) ->
+maybe_set_snapshot({ok, Object}, #state{snapshot = undefined, clock = Clock} = State) ->
     Version = riak_object:get_version(Object),
     if
-        Version /= -1 -> State#state{snapshot = Version};
+        Version /= -1 -> State#state{snapshot = max(Version, Clock)};
         true -> State
     end;
 maybe_set_snapshot(_GetResult, State) -> State.
@@ -325,10 +325,10 @@ maybe_cache_get({ok, Object}, #state{gets = Gets} = State) ->
     State#state{gets = NewGets};
 maybe_cache_get(_GetResult, State) -> State.
 
-maybe_update_clock({ok, Object}, State) ->
+maybe_update_clock({ok, Object}, #state{clock = Clock} = State) ->
     Version = riak_object:get_version(Object),
     if
-        Version /= -1 -> State#state{clock = Version};
+        Version /= -1 -> State#state{clock = max(Version, Clock)};
         true -> State
     end;
 maybe_update_clock(_GetResult, State) -> State.

@@ -17,7 +17,7 @@
 -define(LATEST_OBJECT_VERSIONS, latest_object_versions).
 -define(RUNNING_TRANSACTIONS, running_transactions).
 
--record(state, {id, lsn, step}).
+-record(state, {id, next_lsn, step}).
 
 %%%===================================================================
 %%% API
@@ -46,7 +46,7 @@ init(Id) ->
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Step = case (NNodes - 1) of 0 -> 1; S -> S end,
     State = #state{id = Id,
-                   lsn = Id + 1,
+                   next_lsn = Id + 1,
                    step = Step},
     {ok, State}.
 
@@ -98,8 +98,10 @@ do_update_latest_object_versions(Objects, Version, State) ->
 % Validates transaction as soon as it arrives
 leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
-  #state{id = Id, lsn = Lsn, step = Step} = State
- ) ->
+  #state{id = Id, next_lsn = NextLsn, step = Step} = State
+) ->
+    Lsn = generate_lsn(Snapshot, NextLsn, Step),
+
     lager:info("Leaf validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
@@ -119,15 +121,19 @@ leaf_validate(
     Record = riak_kv_transactions_log:new_log_record(Lsn, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
     riak_kv_transactions_log:append(Id, Record),
 
-    NewState = State#state{lsn = Lsn + Step},
+    NewState = State#state{next_lsn = Lsn + Step},
     {noreply, NewState}.
+
+generate_lsn(Snapshot, Lsn, _Step) when Lsn > Snapshot ->
+    Lsn;
+generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
+    generate_lsn(Snapshot, Lsn + Step, Step).
 
 % Validates the transaction once all the info has arrived from its children
 root_validate(
   TransactionId, Snapshot, Gets1, Puts1, NValidations, Client, Conflicts1, Lsn1,
   #state{id = Id} = State
 ) ->
-    % Update transaction metadata
     case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
         [{TransactionId, Gets2, Puts2, Conflicts2, Lsn2, ReceivedValidations1}] ->
             ets:insert(?RUNNING_TRANSACTIONS, {
