@@ -81,7 +81,7 @@ do_validate_and_commit(
   TransactionId, Snapshot1, Gets1, Puts1, NValidations, Client,
   #state{lsn = Lsn1} = State
 ) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+    %lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
     % Update transaction metadata
     case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
@@ -101,14 +101,14 @@ do_validate_and_commit(
     [{TransactionId, Snapshot, Gets, Puts, Lsn, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            lager:info("Validation in progress...~n", []),
+            %lager:info("Validation in progress...~n", []),
             NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
             Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+            %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
             send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts),
             send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
-            lager:info("Transaction ~p committed~n", [TransactionId]),
+            %lager:info("Transaction ~p committed~n", [TransactionId]),
 
             if
                 not Conflicts -> do_update_latest_object_versions(NbkeyPuts, Lsn);

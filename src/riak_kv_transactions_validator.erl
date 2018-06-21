@@ -93,7 +93,7 @@ do_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn,
   #state{id = Id} = State
 ) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+    %lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Root = NNodes - 1,
@@ -121,9 +121,9 @@ leaf_validate(
         BlindWrite ->
             Conflicts = false;
         true ->
-            lager:info("Leaf validation in progress...~n", []),
-            Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
+            %lager:info("Leaf validation in progress...~n", []),
+            Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn)
+            %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
     end,
 
     if
@@ -185,10 +185,10 @@ do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, tr
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false),
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
-    lager:info("Root validation in progress...~n", []),
+    %lager:info("Root validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
     V = ets:lookup_element(?STATS, n_validations, 2),
     ets:insert(?STATS, {n_validations, V + 1}),
