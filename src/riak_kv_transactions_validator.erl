@@ -16,6 +16,7 @@
 
 -define(OBJECT_VERSIONS, object_versions).
 -define(RUNNING_TRANSACTIONS, running_transactions).
+-define(STATS, stats).
 
 -record(state, {id, next_lsn, step}).
 
@@ -40,6 +41,11 @@ update_object_versions(Id, Objects, Version, TransactionId) ->
 %%%===================================================================
 
 init(Id) ->
+    ets:new(?STATS, [private, named_table]), 
+    ets:insert(?STATS, {n_validations, 0}),
+    ets:insert(?STATS, {n_aborts, 0}),
+    erlang:send_after(60000, self(), print_stats),
+
     ets:new(?OBJECT_VERSIONS, [private, named_table]), 
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
@@ -63,6 +69,13 @@ handle_cast({update_object_versions, Objects, Version, TransactionId}, State) ->
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
     {noreply, State}.
+
+handle_info(print_stats, State) ->
+    NValidations = ets:lookup_element(?STATS, n_validations, 2),
+    NAborts = ets:lookup_element(?STATS, n_aborts, 2),
+    lager:info("STATS: n_validations: ~p, n_aborts: ~p~n", [NValidations, NAborts]),
+    erlang:send_after(60000, self(), print_stats),
+    {noreply, State};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
@@ -120,11 +133,16 @@ leaf_validate(
             Root = NNodes - 1,
             riak_kv_transactions_validator:update_object_versions(Root, NbkeyPuts, Lsn, TransactionId);
         true ->
+            A = ets:lookup_element(?STATS, n_aborts, 2),
+            ets:insert(?STATS, {n_aborts, A + 1}),
             ok
     end,
 
     Record = riak_kv_transactions_log:new_log_record(Lsn, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
     riak_kv_transactions_log:append(Id, Record),
+
+    V = ets:lookup_element(?STATS, n_validations, 2),
+    ets:insert(?STATS, {n_validations, V + 1}),
 
     NewState = State#state{next_lsn = Lsn + Step},
     {noreply, NewState}.
@@ -172,11 +190,17 @@ do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, fa
     Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
     lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
+    V = ets:lookup_element(?STATS, n_validations, 2),
+    ets:insert(?STATS, {n_validations, V + 1}),
+
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true),
 
     if
         not Conflicts -> do_update_object_versions2(NbkeyPuts, Lsn, TransactionId);
-        true -> ok
+        true ->
+            A = ets:lookup_element(?STATS, n_aborts, 2),
+            ets:insert(?STATS, {n_aborts, A + 1}),
+            ok
     end,
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId).
