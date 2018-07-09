@@ -156,17 +156,17 @@ root_validate(
     [{TransactionId, Gets, Puts, Conflicts, Lsn, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
+            do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
         _ ->
             ok
     end,
 
     {noreply, State}.
 
-do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
+do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false),
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
-do_root_commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
+do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
     lager:info("Root validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),

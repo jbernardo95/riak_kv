@@ -80,12 +80,11 @@
 -define(MAGIC, 53).      %% Magic number, as opposed to 131 for Erlang term-to-binary magic
                          %% Shanley's(11) + Joe's(42)
 -define(EMPTY_VTAG_BIN, <<"e">>).
--define(VERSION, <<"version">>).
 
 -export([new/3, new/4, ensure_robject/1, ancestors/1, reconcile/2, equal/2]).
 -export([increment_vclock/2, increment_vclock/3, prune_vclock/3, vclock_descends/2, all_actors/1]).
 -export([actor_counter/2]).
--export([key/1, get_metadata/1, get_metadatas/1, get_values/1, get_dotted_values/1, get_value/1, get_version/1, get_tentative_version/1]).
+-export([key/1, get_metadata/1, get_metadatas/1, get_values/1, get_dotted_values/1, get_value/1, get_metadata_value/3]).
 -export([hash/1, hash/2, approximate_size/2, value_size/1]).
 -export([vclock_encoding_method/0, vclock/1, vclock_header/1, encode_vclock/1, decode_vclock/1]).
 -export([encode_vclock/2, decode_vclock/2]).
@@ -326,8 +325,8 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
 
     % Sort OldContents in descending order
     SortFun = fun(C1, C2) ->
-                      V1 = get_version(C1),
-                      V2 = get_version(C2),
+                      V1 = get_metadata_value(C1, <<"version">>, -1),
+                      V2 = get_metadata_value(C2, <<"version">>, -1),
                       V1 >= V2
               end,
     SortedContents = lists:sort(SortFun, OldContents),
@@ -341,7 +340,7 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
                                   % If transaction was committed
                                   % Commit tentative value by adding a version to it
                                   Conflicts == false ->
-                                      NewM = dict:store(?VERSION, Lsn, M),
+                                      NewM = dict:store(<<"version">>, Lsn, M),
                                       {Versions, [C#r_content{metadata = NewM} | Rest]};
 
                                   % Else discard the tentative value
@@ -351,7 +350,7 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
 
                           % Not involved in the transaction
                           true ->
-                              case get_version(C) of
+                              case get_metadata_value(M, <<"version">>, -1) of
                                   % Temporary value
                                   -1 ->
                                       {Versions, [C | Rest]};
@@ -734,36 +733,17 @@ get_value(Object=#r_object{}) ->
     [{_M,Value}] = get_contents(Object),
     Value.
 
-get_version(#r_object{} = Object) ->
+get_metadata_value(#r_object{} = Object, Key, Default) ->
     Metadata = get_metadata(Object),
-    get_version(Metadata);
-
-get_version(#r_content{metadata = Metadata}) ->
-    get_version(Metadata);
-
-get_version({Metadata, _Value}) ->
-    get_version(Metadata);
-
-get_version(Metadata) ->
-    case dict:find(?VERSION, Metadata) of
+    get_metadata_value(Metadata, Key, Default);
+get_metadata_value(#r_content{metadata = Metadata}, Key, Default) ->
+    get_metadata_value(Metadata, Key, Default);
+get_metadata_value({Metadata, _Value}, Key, Default) ->
+    get_metadata_value(Metadata, Key, Default);
+get_metadata_value(Metadata, Key, Default) ->
+    case dict:find(Key, Metadata) of
         {ok, Value} -> Value;
-        error -> -1 
-    end.
-
-get_tentative_version(#r_object{} = Object) ->
-    Metadata = get_metadata(Object),
-    get_tentative_version(Metadata);
-
-get_tentative_version(#r_content{metadata = Metadata}) ->
-    get_tentative_version(Metadata);
-
-get_tentative_version({Metadata, _Value}) ->
-    get_tentative_version(Metadata);
-
-get_tentative_version(Metadata) ->
-    case dict:find(<<"tentative_version">>, Metadata) of
-        {ok, Value} -> Value;
-        error -> -1 
+        error -> Default 
     end.
 
 %% @doc calculates the canonical hash of a riak object

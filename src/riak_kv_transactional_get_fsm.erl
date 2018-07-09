@@ -1,8 +1,8 @@
--module(riak_kv_node_get_fsm).
+-module(riak_kv_transactional_get_fsm).
 
 -behaviour(gen_fsm).
 
--export([start_link/4]).
+-export([start_link/6]).
 -export([init/1,
          handle_event/3,
          handle_sync_event/4,
@@ -13,7 +13,7 @@
          wait_for_vnode/2,
          respond_to_client/2]).
 
--record(state, {node, bucket, key, client, timerref, retval, timeout}).
+-record(state, {node, bucket, key, snapshot, read_only, client, timerref, retval, timeout}).
 
 -define(DEFAULT_TIMEOUT, 60000).
 
@@ -21,9 +21,9 @@
 %% Public API
 %% ===================================================================
 
-start_link(Node, Bucket, Key, Client) ->
-    Args = [Node, Bucket, Key, Client],
-    case sidejob_supervisor:start_child(riak_kv_node_get_fsm_sj,
+start_link(Node, Bucket, Key, Snapshot, ReadOnly, Client) ->
+    Args = [Node, Bucket, Key, Snapshot, ReadOnly, Client],
+    case sidejob_supervisor:start_child(riak_kv_transactional_get_fsm_sj,
                                         gen_fsm, start_link,
                                         [?MODULE, Args, []]) of
         {error, overload} = Reply ->
@@ -37,10 +37,12 @@ start_link(Node, Bucket, Key, Client) ->
 %% gen_fsm callbacks
 %% ====================================================================
 
-init([Node, Bucket, Key, Client]) ->
+init([Node, Bucket, Key, Snapshot, ReadOnly, Client]) ->
     StateData = #state{node = Node,
                        bucket = Bucket,
                        key = Key,
+                       snapshot = Snapshot, 
+                       read_only = ReadOnly,
                        client = Client,
                        timerref = undefined,
                        retval = undefined,
@@ -51,32 +53,26 @@ execute(
   timeout,
   #state{node = Node,
          bucket = Bucket,
-         key = Key} = StateData
+         key = Key,
+         snapshot = Snapshot,
+         read_only = ReadOnly} = StateData
 ) ->
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     {_RingSize, IdxNodes} = element(4, Ring), 
     Vnode = lists:keyfind(Node, 2, IdxNodes),
 
-    riak_kv_vnode:get(Vnode, {Bucket, Key}, node_get),
+    riak_kv_vnode:transactional_get(Vnode, {Bucket, Key}, Snapshot, ReadOnly),
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
     {next_state, wait_for_vnode, NewStateData}.
 
-wait_for_vnode(
-  {r, Retval1, _Idx, node_get},
-  #state{node = Node} = StateData
-) ->
-    Retval = case Retval1 of
-                 {ok, Object} -> {ok, riak_object:set_node(Object, Node)};
-                 _ -> Retval1
-             end,
-
-    NewStateData = StateData#state{retval = Retval},
-    {next_state, respond_to_client, NewStateData, 0};
-
 wait_for_vnode(timeout, StateData) ->
     NewStateData = StateData#state{timeout = true},
+    {next_state, respond_to_client, NewStateData, 0};
+
+wait_for_vnode(Retval, StateData) ->
+    NewStateData = StateData#state{retval = Retval},
     {next_state, respond_to_client, NewStateData, 0}.
 
 respond_to_client(timeout, #state{client = Client, retval = Retval, timeout = Timeout} = StateData) ->

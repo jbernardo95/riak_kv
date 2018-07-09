@@ -219,101 +219,11 @@ do_get_local(Node, Bucket, Key, #state{gets = Gets, puts = Puts}) ->
     end.
 
 do_get_remote(Node, Bucket, Key, {_, [ClientNode, _]}, Snapshot, ReadOnly) ->
-    proc_lib:spawn_link(ClientNode, riak_kv_node_get_fsm, start_link, [Node, Bucket, Key, self()]),
-
-    receive
-        {ok, Object} ->
-            select_object_content(Object, Snapshot, ReadOnly);
-        {error, _Reason} = Error ->
-            Error
-    end.
-
-% Selects latest r_content taking in account the snapshot for tentative r_content 
-% 
-% For an object with the following content: 1, 2, 5, 8, t10, t15 a client with snapshot
-% 12 will get an object with content t10
-%
-% For an object with the following content: 1, 2, 5, 8, 10 a client with snapshot 9
-% will get an object with content 10
-select_object_content(Object, Snapshot, false = _ReadOnly) ->
-    SelectFun = fun(Content, Acc) ->
-                        ContentVersion = riak_object:get_version(Content),
-                        if
-                            Acc == nil -> Content;
-                            Acc /= nil ->
-                                AccVersion = case riak_object:get_version(Acc) of
-                                                 -1 -> riak_object:get_tentative_version(Acc); 
-                                                 Version -> Version
-                                             end,
-                                if
-                                    ContentVersion == -1 -> % Tentative content
-                                        ContentVersion1 = riak_object:get_tentative_version(Content),
-                                        if
-                                            ContentVersion1 > AccVersion andalso ContentVersion1 =< Snapshot -> Content;
-                                            true -> Acc
-                                        end;
-
-                                    true -> % Committed content
-                                        if
-                                            ContentVersion > AccVersion -> Content;
-                                            true -> Acc
-                                        end
-                                end
-                        end
-                end,
-    do_select_object_content(Object, SelectFun);
-
-% Selects the r_content consistent with the given snapshot
-% 
-% For an object with the following content: 1, 2, 5, 8, t10, t15 a client with snapshot
-% 12 will get an object with content t10
-%
-% For an object with the following content: 1, 2, 5, 8, 10 a client with snapshot 9
-% will get an object with content 8
-select_object_content(Object, Snapshot, true = _ReadOnly) ->
-    SelectFun = fun(Content, Acc) ->
-                        ContentVersion = case riak_object:get_version(Content) of
-                                             -1 -> riak_object:get_tentative_version(Content); 
-                                             Version1 -> Version1
-                                         end,
-                        if
-                            Acc == nil ->
-                                if
-                                    ContentVersion =< Snapshot -> Content;
-                                    true -> Acc
-                                end;
-                            Acc /= nil ->
-                                AccVersion = case riak_object:get_version(Acc) of
-                                                 -1 -> riak_object:get_tentative_version(Acc); 
-                                                 Version2 -> Version2
-                                             end,
-                                if
-                                    ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
-                                    true -> Acc
-                                end
-                        end
-                end,
-    do_select_object_content(Object, SelectFun).
-
-do_select_object_content(Object, SelectFun) ->
-    Contents = riak_object:get_contents(Object),
-    SelectedContent = lists:foldl(SelectFun, nil, Contents),
-    if
-        SelectedContent == nil ->
-            {error, not_found};
-        true ->
-            Version = riak_object:get_version(SelectedContent),
-            case Version of
-                -1 -> % Selected content has not yet been committed
-                    {error, try_again};
-                _ -> % Selected content has been committed
-                    NewObject = riak_object:set_contents(Object, [SelectedContent]),
-                    {ok, NewObject}
-            end
-    end.
+    proc_lib:spawn_link(ClientNode, riak_kv_transactional_get_fsm, start_link, [Node, Bucket, Key, Snapshot, ReadOnly, self()]),
+    receive Response -> Response end.
 
 maybe_set_snapshot({ok, Object}, #state{snapshot = undefined, clock = Clock} = State) ->
-    Version = riak_object:get_version(Object),
+    Version = riak_object:get_metadata_value(Object, <<"version">>, -1),
     if
         Version /= -1 -> State#state{snapshot = max(Version, Clock)};
         true -> State
@@ -326,7 +236,7 @@ maybe_cache_get({ok, Object}, #state{gets = Gets} = State) ->
 maybe_cache_get(_GetResult, State) -> State.
 
 maybe_update_clock({ok, Object}, #state{clock = Clock} = State) ->
-    Version = riak_object:get_version(Object),
+    Version = riak_object:get_metadata_value(Object, <<"version">>, -1),
     if
         Version /= -1 -> State#state{clock = max(Version, Clock)};
         true -> State
@@ -334,7 +244,7 @@ maybe_update_clock({ok, Object}, #state{clock = Clock} = State) ->
 maybe_update_clock(_GetResult, State) -> State.
 
 check_get_conflict({ok, Object}, Snapshot) ->
-    riak_object:get_version(Object) > Snapshot;
+    riak_object:get_metadata_value(Object, <<"version">>, -1) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
 commit_reply(true) -> {error, aborted};

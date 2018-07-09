@@ -19,7 +19,9 @@
 %% under the License.
 %%
 %% -------------------------------------------------------------------
+
 -module(riak_kv_vnode).
+
 -behaviour(riak_core_vnode).
 
 %% API
@@ -28,6 +30,7 @@
          start_vnodes/1,
          commit_transaction/6,
          transaction_validation/5,
+         transactional_get/4,
          get/3,
          get/4,
          del/3,
@@ -141,7 +144,8 @@
                 md_cache_size :: pos_integer(),
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
-                update_hook = riak_kv_noop_update_hook :: update_hook()}).
+                update_hook = riak_kv_noop_update_hook :: update_hook(),
+                pending_transactional_gets :: ets:tab()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -250,6 +254,10 @@ commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations) ->
 
 transaction_validation(Preflist, Id, Puts, Conflicts, Lsn) ->
     Request = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
+    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
+
+transactional_get(Preflist, BKey, Snapshot, ReadOnly) ->
+    Request = riak_kv_requests:new_transactional_get_request(BKey, Snapshot, ReadOnly),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 get(PreflistOrVnodePid, BKey, ReqId) ->
@@ -480,15 +488,18 @@ init([Index]) ->
                 lager:debug("No metadata cache size defined, not starting"),
                 undefined
         end,
+    PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
+
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
-            DoAsyncPut =  case app_helper:get_env(riak_kv, allow_async_put, true) of
-                true ->
-                    erlang:function_exported(Mod, async_put, 5);
-                _ ->
-                    false
-            end,
+            DoAsyncPut = case app_helper:get_env(riak_kv, allow_async_put, true) of
+                             true ->
+                                 erlang:function_exported(Mod, async_put, 5);
+                             _ ->
+                                 false
+                         end,
+
             State = #state{idx = Index,
                            async_folding = AsyncFolding,
                            mod = Mod,
@@ -504,7 +515,9 @@ init([Index]) ->
                            mrjobs = dict:new(),
                            md_cache = MDCache,
                            md_cache_size = MDCacheSize,
-                           update_hook = update_hook()},
+                           update_hook = update_hook(),
+                           pending_transactional_gets = PendingTransactionalGets},
+
             try_set_vnode_lock_limit(Index),
 
             case AsyncFolding of
@@ -535,6 +548,8 @@ handle_overload_command(Req, Sender, Idx) ->
 handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
 handle_overload_request(kv_transaction_validation_request, _Req, Sender, Idx) ->
+    erlang:send(Sender, {error, overload, Idx});
+handle_overload_request(kv_transactional_get_request, _Req, Sender, Idx) ->
     erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
@@ -779,6 +794,9 @@ handle_request(kv_commit_transaction_request, Req, Sender, State) ->
     {noreply, NewState};
 handle_request(kv_transaction_validation_request, Req, Sender, State) ->
     NewState = handle_transaction_validation_request(Req, Sender, State),
+    {noreply, NewState};
+handle_request(kv_transactional_get_request, Req, Sender, State) ->
+    NewState = handle_transactional_get_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
@@ -1365,7 +1383,9 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
 
     NewState.
 
-handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
+handle_transaction_validation_request(Req, _Sender, #state{idx = Idx,
+    pending_transactional_gets = PendingTransactionalGets} = State) ->
+
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
@@ -1378,12 +1398,143 @@ handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) -
     Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
 
     % Commit or discard each temporary put
-    lists:foldl(fun({Bucket, Key} = Bkey, State1) ->
-                        Object1 = riak_object:new(Bucket, Key, nil),
-                        Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
-                        {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
-                        State2
-                end, State, Puts).
+    NewState1 = lists:foldl(fun({Bucket, Key} = Bkey, AccState1) ->
+                                   Object1 = riak_object:new(Bucket, Key, nil),
+                                   Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
+                                   {_, AccState2} = do_put(Bkey, Object, 0, 0, [], AccState1),
+                                   AccState2
+                           end, State, Puts),
+
+    % Handle pending transactional get requests
+    NewState = case ets:lookup(PendingTransactionalGets, Id) of
+                   [{Id, PendingTransactionalGetRequests}] ->
+                       lists:foldl(fun({Req1, Sender1}, AccState) ->
+                                           handle_transactional_get_request(Req1, Sender1, AccState)
+                                   end, NewState1, PendingTransactionalGetRequests);
+                   [] -> NewState1
+               end,
+    ets:delete(PendingTransactionalGets, Id),
+
+    NewState.
+
+handle_transactional_get_request(Req, Sender, #state{idx = Idx,
+    pending_transactional_gets = PendingTransactionalGets} = State) ->
+
+    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+
+    Bkey = riak_kv_requests:get_bucket_key(Req),
+    Snapshot = riak_kv_requests:get_snapshot(Req),
+    ReadOnly = riak_kv_requests:get_read_only(Req),
+
+    {reply, {r, Retval, _, _}, State2} = do_get(undefined, Bkey, undefined, State),
+    Reply = case Retval of
+                {ok, Object} ->
+                    ObjectContents = riak_object:get_contents(Object),
+                    SnapshotConsistentContent = select_snapshot_consistent_content(ObjectContents, Snapshot, ReadOnly),
+                    if
+                        SnapshotConsistentContent == nil ->
+                            {error, not_found};
+                        true ->
+                            Version = riak_object:get_metadata_value(SnapshotConsistentContent, <<"version">>, -1),
+                            case Version of
+                                -1 ->
+                                    % Selected content has not yet been committed
+                                    % So save the request as pending until the transaction is committed
+                                    TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
+                                    lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+
+                                    case ets:lookup(PendingTransactionalGets, TransactionId) of
+                                        [{TransactionId, PendingTransactionalGets}] ->
+                                            ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGets]});
+                                        [] ->
+                                            ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
+                                    end,
+
+                                    no_reply;
+                                _ ->
+                                    % Selected content has been committed
+                                    Object1 = riak_object:set_node(Object, node()),
+                                    Object2 = riak_object:set_contents(Object1, [SnapshotConsistentContent]),
+                                    {ok, Object2}
+                            end
+                    end;
+
+                Retval -> Retval
+            end,
+
+    case Reply of
+        no_reply -> ok;
+        Reply -> riak_core_vnode:reply(Sender, Reply)
+    end,
+
+    State2.
+
+% Selects latest r_content taking in account the snapshot for tentative r_content 
+% 
+% For the following contents list: 1, 2, 5, 8, t10, t15 a client with snapshot
+% 12 will get an object with content t10
+%
+% For the following contents list: 1, 2, 5, 8, 10 a client with snapshot 9
+% will get an object with content 10
+select_snapshot_consistent_content(Contents, Snapshot, false = _ReadOnly) ->
+    SelectFun = fun(Content, Acc) ->
+                        ContentVersion = riak_object:get_metadata_value(Content, <<"version">>, -1),
+                        if
+                            Acc == nil -> Content;
+                            Acc /= nil ->
+                                AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
+                                                 -1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
+                                                 Version -> Version
+                                             end,
+                                if
+                                    ContentVersion == -1 -> % Tentative content
+                                        ContentVersion1 = riak_object:get_metadata_value(Content, <<"tentative_version">>, -1),
+                                        if
+                                            ContentVersion1 > AccVersion andalso ContentVersion1 =< Snapshot -> Content;
+                                            true -> Acc
+                                        end;
+
+                                    true -> % Committed content
+                                        if
+                                            ContentVersion > AccVersion -> Content;
+                                            true -> Acc
+                                        end
+                                end
+                        end
+                end,
+    lists:foldl(SelectFun, nil, Contents);
+
+% Selects the r_content consistent with the given snapshot
+% 
+% For the following contents list: 1, 2, 5, 8, t10, t15 a client with snapshot
+% 12 will get an object with content t10
+%
+% For the following contents list: 1, 2, 5, 8, 10 a client with snapshot 9
+% will get an object with content 8
+select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
+    SelectFun = fun(Content, Acc) ->
+                        ContentVersion = case riak_object:get_metadata_value(Content, <<"version">>, -1) of
+                                             -1 -> riak_object:get_metadata_value(Content, <<"tentative_version">>, -1); 
+                                             Version1 -> Version1
+                                         end,
+                        if
+                            Acc == nil ->
+                                if
+                                    ContentVersion =< Snapshot -> Content;
+                                    true -> Acc
+                                end;
+                            Acc /= nil ->
+                                AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
+                                                 -1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
+                                                 Version2 -> Version2
+                                             end,
+                                if
+                                    ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
+                                    true -> Acc
+                                end
+                        end
+                end,
+    lists:foldl(SelectFun, nil, Contents).
 
 %% @private
 do_put(Request, State) ->
