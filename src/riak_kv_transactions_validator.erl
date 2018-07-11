@@ -14,6 +14,7 @@
          terminate/2,
          code_change/3]).
 
+-define(LAST_TRANSACTIONS, last_transactions).
 -define(OBJECT_VERSIONS, object_versions).
 -define(RUNNING_TRANSACTIONS, running_transactions).
 
@@ -40,6 +41,7 @@ update_object_versions(Id, Objects, Version, TransactionId) ->
 %%%===================================================================
 
 init(Id) ->
+    ets:new(?LAST_TRANSACTIONS, [ordered_set, private, named_table]), 
     ets:new(?OBJECT_VERSIONS, [private, named_table]), 
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
@@ -58,7 +60,8 @@ handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client
     do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, State);
 
 handle_cast({update_object_versions, Objects, Version, TransactionId}, State) ->
-    do_update_object_versions(Objects, Version, TransactionId, State);
+    do_update_object_versions(Objects, Version, TransactionId),
+    {noreply, State};
 
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
@@ -91,10 +94,6 @@ do_validate(
             root_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, State)
     end.
 
-do_update_object_versions(Objects, Version, TransactionId, State) ->
-    do_update_object_versions2(Objects, Version, TransactionId),
-    {noreply, State}.
-
 % Validates transaction as soon as it arrives
 leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
@@ -104,18 +103,19 @@ leaf_validate(
 
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
+    lager:info("Leaf validation in progress...~n", []),
     if
         BlindWrite ->
-            Conflicts = false;
+            Conflicts = false,
+            lager:info("Blind write, conflicts false~n", []);
         true ->
-            lager:info("Leaf validation in progress...~n", []),
             Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
             lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
     end,
 
     if
-        not Conflicts ->
-            do_update_object_versions2(NbkeyPuts, Lsn, TransactionId),
+        (not Conflicts) and (NbkeyPuts /= []) ->
+            do_update_object_versions(NbkeyPuts, Lsn, TransactionId),
             {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
             Root = NNodes - 1,
             riak_kv_transactions_validator:update_object_versions(Root, NbkeyPuts, Lsn, TransactionId);
@@ -175,25 +175,58 @@ do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, 
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true),
 
     if
-        not Conflicts -> do_update_object_versions2(NbkeyPuts, Lsn, TransactionId);
+        (not Conflicts) and (NbkeyPuts /= []) -> do_update_object_versions(NbkeyPuts, Lsn, TransactionId);
         true -> ok
     end,
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId).
 
-do_update_object_versions2(Nbkeys, Version, TransactionId) ->
+do_update_object_versions(Nbkeys, Version, TransactionId) ->
+    % Update object versions
+    case ets:lookup(?LAST_TRANSACTIONS, Version) of
+        [{Version, Objects}] ->
+            ets:insert(?LAST_TRANSACTIONS, {Version, [Nbkeys | Objects]});
+        [] ->
+            ets:insert(?LAST_TRANSACTIONS, {Version, Nbkeys})
+    end,
     lists:foreach(
         fun(Nbkey) ->
             case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
+                [{Nbkey, garbage_collected}] ->
+                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId}]});
                 [{Nbkey, VTIds}] ->
-                    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
-                    NewVersions = lists:sublist([{Version, TransactionId} | VTIds], 1, MaximumObjectVersions),
-                    ets:insert(?OBJECT_VERSIONS, {Nbkey, NewVersions});
+                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId} | VTIds]});
                 [] ->
                     ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId}]})
             end
         end,
         Nbkeys
+    ),
+
+    % Garbage collect object versions
+    {ok, MaximumLastTransactions} = application:get_env(riak_kv, transactions_validator_maximum_last_transactions),
+    LastTransactionsSize = ets:info(?LAST_TRANSACTIONS, size),
+    if
+        LastTransactionsSize > MaximumLastTransactions ->
+            Lsn = ets:first(?LAST_TRANSACTIONS),
+            ObjectsToTrim = ets:lookup_element(?LAST_TRANSACTIONS, Lsn, 2),
+            ets:delete(?LAST_TRANSACTIONS, Lsn);
+        true ->
+            ObjectsToTrim = []
+    end,
+    lists:foreach(
+        fun(Nbkey) ->
+            case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
+                [{Nbkey, VTIds}] ->
+                    case lists:split(length(VTIds) - 1, VTIds) of
+                        {[], _} ->
+                            ets:insert(?OBJECT_VERSIONS, {Nbkey, garbage_collected});
+                        {NewVTIds, _} ->
+                            ets:insert(?OBJECT_VERSIONS, {Nbkey, NewVTIds})
+                    end
+            end
+        end,
+        ObjectsToTrim 
     ).
 
 check_conflicts(TransactionId, Gets, Puts, Snapshot, Lsn) ->
@@ -208,14 +241,21 @@ do_check_conflicts(_TransactionId, _Objects, _Snapshot, _Lsn, true) -> true;
 do_check_conflicts(_TransactionId, [], _Snapshot, _Lsn, Conflict) -> Conflict;
 do_check_conflicts(TransactionId, [Nbkey | Rest], Snapshot, Lsn, Conflict1) ->
     Conflict2 = case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
-                    [{Nbkey, VTIds}] -> check_object_conflicts(VTIds, TransactionId, Snapshot, Lsn);
-                    [] -> false
+                    [{Nbkey, garbage_collected}] ->
+                        % Not enough metadata to correctly check if there are conflicts so, just say conservatively there are conflicts
+                        true;
+                    [{Nbkey, VTIds}] ->
+                        check_object_conflicts(VTIds, TransactionId, Snapshot, Lsn);
+                    [] ->
+                        % Object has no versions so, there are no conflicts 
+                        false
                 end,
 
     NewConflict = Conflict1 or Conflict2,
     do_check_conflicts(TransactionId, Rest, Snapshot, Lsn, NewConflict).
 
-check_object_conflicts([], _TransactionId, _Snapshot, _Lsn) -> false;
+% This function assumes versions are ordered in descending ordered
+check_object_conflicts([], _TransactionId, _Snapshot, _Lsn) -> true;
 check_object_conflicts([{_, TransactionId} | Rest], TransactionId, Snapshot, Lsn) ->
     check_object_conflicts(Rest, TransactionId, Snapshot, Lsn);
 check_object_conflicts([{Version, _} | _], _TransactionId, Snapshot, _Lsn) when Version =< Snapshot -> false;
