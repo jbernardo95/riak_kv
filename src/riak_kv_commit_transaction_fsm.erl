@@ -9,9 +9,13 @@
          handle_info/3,
          terminate/3,
          code_change/4]).
--export([prepare/2,
-         execute/2,
-         wait_for_transactions_manager/2,
+-export([group_objects_per_node/2,
+         prepare/2,
+         wait_for_prepare_results/2,
+         commit/2,
+         wait_for_commit_results/2,
+         prepare_commit/2,
+         wait_for_prepare_commit_result/2,
          respond_to_client/2]).
 
 -record(state, {id,
@@ -19,11 +23,13 @@
                 gets,
                 puts,
                 client,
+                nodes,
                 node_gets, 
                 node_puts, 
                 timerref,
-                conflicts,
-                lsn,
+                received_prepare_results,
+                prepare_result,
+                received_commit_results,
                 timeout}).
 
 -define(DEFAULT_TIMEOUT, 60000).
@@ -54,15 +60,17 @@ init([Id, Snapshot, Gets, Puts, Client]) ->
                        gets = Gets,
                        puts = Puts,
                        client = Client,
+                       nodes = undefined,
                        node_gets = undefined,
                        node_puts = undefined,
                        timerref = undefined,
-                       conflicts = undefined,
-                       lsn = undefined,
+                       received_prepare_results = 0,
+                       prepare_result = undefined,
+                       received_commit_results = 0,
                        timeout = false},
-    {ok, prepare, StateData, 0}.
+    {ok, group_objects_per_node, StateData, 0}.
 
-prepare(timeout, #state{gets = Gets, puts = Puts} = StateData) ->
+group_objects_per_node(timeout, #state{gets = Gets, puts = Puts} = StateData) ->
     FoldFun = fun(Object, NodePuts1) ->
                       Node = riak_object:get_node(Object),
                       case dict:find(Node, NodePuts1) of
@@ -73,20 +81,27 @@ prepare(timeout, #state{gets = Gets, puts = Puts} = StateData) ->
     NodeGets = lists:foldl(FoldFun, dict:new(), Gets),
     NodePuts = lists:foldl(FoldFun, dict:new(), Puts),
 
-    NewStateData = StateData#state{node_gets = NodeGets, node_puts = NodePuts},
-    {next_state, execute, NewStateData, 0}.
+    Nodes = lists:usort(dict:fetch_keys(NodeGets) ++ dict:fetch_keys(NodePuts)),
 
-execute(
+    NewStateData = StateData#state{nodes = Nodes,
+                                   node_gets = NodeGets,
+                                   node_puts = NodePuts},
+    if
+        length(Nodes) == 1 ->
+            {next_state, prepare_commit, NewStateData, 0};
+        true ->
+            {next_state, prepare, NewStateData, 0}
+    end.
+
+prepare(
   timeout,
-  #state{id = Id,
-         snapshot = Snapshot,
+  #state{snapshot = Snapshot,
+         nodes = Nodes,
          node_gets = NodeGets,
          node_puts = NodePuts} = StateData
 ) ->
-    Nodes = lists:usort(dict:fetch_keys(NodeGets) ++ dict:fetch_keys(NodePuts)),
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     {_RingSize, IdxNodes} = element(4, Ring), 
-    NValidations = length(Nodes),
     lists:foreach(fun(Node) ->
                           Vnode = lists:keyfind(Node, 2, IdxNodes),
                           Gets = case dict:find(Node, NodeGets) of
@@ -98,29 +113,111 @@ execute(
                                      {ok, Puts1} -> Puts1;
                                      error -> []
                                  end,
-                          riak_kv_vnode:commit_transaction(Vnode, Id, Snapshot, Gets, Puts, NValidations)
+                          riak_kv_vnode:prepare_transaction(Vnode, Snapshot, Gets, Puts)
                   end, Nodes),
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
-    {next_state, wait_for_transactions_manager, NewStateData}.
+    {next_state, wait_for_prepare_results, NewStateData}.
 
-wait_for_transactions_manager(
-  {transaction_commit_result, Id, Conflicts, Lsn},
-  #state{id = Id} = StateData
+wait_for_prepare_results(
+  {prepare_result, PrepareResult},
+  #state{nodes = Nodes} = StateData
 ) ->
-    NewStateData = StateData#state{conflicts = Conflicts, lsn = Lsn},
-    {next_state, respond_to_client, NewStateData, 0};
+    NewStateData = receive_prepare_result(PrepareResult, StateData),
+    case NewStateData of
+        #state{received_prepare_results = ReceivedPrepareResults} when ReceivedPrepareResults == length(Nodes) ->
+            {next_state, commit, NewStateData, 0};
+        _ ->
+            {next_state, wait_for_prepare_results, NewStateData}
+    end;
 
-wait_for_transactions_manager(timeout, StateData) ->
+wait_for_prepare_results(timeout, StateData) ->
     NewStateData = StateData#state{timeout = true},
     {next_state, respond_to_client, NewStateData, 0}.
 
-respond_to_client(timeout, #state{client = Client, conflicts = Conflicts,
-                                  lsn = Lsn, timeout = Timeout} = StateData) ->
+commit(
+  timeout,
+  #state{id = Id,
+         nodes = Nodes,
+         node_gets = NodeGets,
+         node_puts = NodePuts,
+         prepare_result = PrepareResult} = StateData
+) ->
+    {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
+    {_RingSize, IdxNodes} = element(4, Ring), 
+    lists:foreach(fun(Node) ->
+                          Vnode = lists:keyfind(Node, 2, IdxNodes),
+                          Gets = case dict:find(Node, NodeGets) of
+                                     {ok, Gets1} ->
+                                         lists:map(fun riak_object:nbkey/1, Gets1);
+                                     error -> []
+                                 end,
+                          Puts = case dict:find(Node, NodePuts) of
+                                     {ok, Puts1} -> Puts1;
+                                     error -> []
+                                 end,
+                          NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+                          riak_kv_vnode:commit_transaction(Vnode, Id, Gets, NbkeyPuts, PrepareResult)
+                  end, Nodes),
+
+    {next_state, wait_for_commit_results, StateData}.
+
+wait_for_commit_results(
+  {commit_result, CommitResult},
+  #state{nodes = Nodes} = StateData
+) ->
+    NewStateData = receive_commit_result(CommitResult, StateData),
+    case NewStateData of
+        #state{received_commit_results = ReceivedCommitResults} when ReceivedCommitResults == length(Nodes) ->
+            {next_state, respond_to_client, NewStateData, 0};
+        _ ->
+            {next_state, wait_for_commit_results, NewStateData}
+    end;
+
+wait_for_commit_results(timeout, StateData) ->
+    NewStateData = StateData#state{timeout = true},
+    {next_state, respond_to_client, NewStateData, 0}.
+
+prepare_commit(
+  timeout,
+  #state{snapshot = Snapshot,
+         nodes = [Node],
+         node_gets = NodeGets,
+         node_puts = NodePuts} = StateData
+) ->
+    {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
+    {_RingSize, IdxNodes} = element(4, Ring), 
+    Vnode = lists:keyfind(Node, 2, IdxNodes),
+    Gets = case dict:find(Node, NodeGets) of
+               {ok, Gets1} ->
+                   lists:map(fun riak_object:nbkey/1, Gets1);
+               error -> []
+           end,
+    Puts = case dict:find(Node, NodePuts) of
+               {ok, Puts1} -> Puts1;
+               error -> []
+           end,
+    riak_kv_vnode:prepare_commit_transaction(Vnode, Snapshot, Gets, Puts),
+
+    TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
+    NewStateData = StateData#state{timerref = TimerRef},
+    {next_state, wait_for_prepare_commit_result, NewStateData}.
+
+wait_for_prepare_commit_result({prepare_commit_result, PrepareCommitResult}, StateData) ->
+    NewStateData = StateData#state{prepare_result = PrepareCommitResult},
+    {next_state, respond_to_client, NewStateData, 0};
+
+wait_for_prepare_commit_result(timeout, StateData) ->
+    NewStateData = StateData#state{timeout = true},
+    {next_state, respond_to_client, NewStateData, 0}.
+
+respond_to_client(timeout, #state{client = Client,
+                                  prepare_result = {Result, Timestamp},
+                                  timeout = Timeout} = StateData) ->
     Reply = if
                 Timeout -> {error, timeout};
-                true -> {ok, Conflicts, Lsn}
+                true -> {ok, Result, Timestamp}
             end,
     erlang:send(Client, Reply),
     {stop, normal, StateData}.
@@ -150,3 +247,15 @@ schedule_timeout(infinity) ->
     undefined;
 schedule_timeout(Timeout) ->
     erlang:send_after(Timeout, self(), timeout).
+
+receive_prepare_result(PrepareResult, #state{received_prepare_results = ReceivedPrepareResults} = StateData) ->
+    do_receive_prepare_result(PrepareResult, StateData#state{received_prepare_results = ReceivedPrepareResults + 1}).
+
+do_receive_prepare_result(PrepareResult, #state{prepare_result = undefined} = StateData) -> StateData#state{prepare_result = PrepareResult};
+do_receive_prepare_result({aborted, _} = PrepareResult, StateData) -> StateData#state{prepare_result = PrepareResult};
+do_receive_prepare_result(_, #state{prepare_result = {aborted, _}} = StateData) -> StateData;
+do_receive_prepare_result({prepared, Timestamp1}, #state{prepare_result = {prepared, Timestamp2}} = StateData) ->
+    StateData#state{prepare_result = {prepared, max(Timestamp1, Timestamp2)}}.
+
+receive_commit_result(ok = _CommitResult, #state{received_commit_results = ReceivedCommitResults} = StateData) ->
+    StateData#state{received_commit_results = ReceivedCommitResults + 1}.

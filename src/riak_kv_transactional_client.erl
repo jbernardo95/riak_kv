@@ -72,7 +72,7 @@ handle_call(
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            Reply = {error, aborted},
+            Reply = commit_reply(aborted),
             NewState = clean_transaction_state(NewState1),
             {reply, Reply, NewState};
         true ->
@@ -247,10 +247,6 @@ check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_metadata_value(Object, <<"version">>, -1) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
-commit_reply(true) -> {error, aborted};
-commit_reply(false) -> ok;
-commit_reply(_) -> error.
-
 create_object(Node, Bucket, Key, Value, Id, TentativeVersion) ->
     Object = riak_object:new(Node, Bucket, Key),
     Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
@@ -261,7 +257,7 @@ do_commit_transaction(Id, undefined, Gets, Puts, #state{clock = Clock} = State) 
     do_commit_transaction(Id, Clock, Gets, Puts, State);
 
 do_commit_transaction(_Id, Snapshot, _Gets, [], State) ->
-    Reply = commit_reply(false),
+    Reply = commit_reply(prepared),
     NewState1 = clean_transaction_state(State),
     NewState = NewState1#state{clock = Snapshot},
     {reply, Reply, NewState};
@@ -271,11 +267,14 @@ do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = {_, [Node, _]}} 
                         [Id, Snapshot, Gets, Puts, self()]),
 
     receive
-        {ok, Conflicts, Lsn} ->
-            Reply = commit_reply(Conflicts),
+        {ok, Result, Timestamp} ->
+            Reply = commit_reply(Result),
             NewState1 = clean_transaction_state(State),
-            NewState = NewState1#state{clock = Lsn},
+            NewState = NewState1#state{clock = Timestamp},
             {reply, Reply, NewState};
         {error, _Reason} = Reply ->
             {reply, Reply, State}
     end.
+
+commit_reply(prepared) -> ok;
+commit_reply(aborted) -> {error, aborted}.

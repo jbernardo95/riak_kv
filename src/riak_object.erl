@@ -303,23 +303,15 @@ merge_write_once(OldObject, NewObject) ->
             NewObject
     end.
 
-append_merge_contents(
-  #r_object{contents = OldContents},
-  #r_object{contents = NewContents}
-) ->
-    [NewContent] = NewContents,
-    [NewContent | OldContents].
-
-transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObject) ->
+transaction_commit_abort_merge_contents(#r_object{contents = OldContents}, NewObject) ->
     Metadata = get_metadata(NewObject),
     Id = dict:fetch(<<"transaction_id">>, Metadata),
-    Conflicts = dict:fetch(<<"transaction_conflicts">>, Metadata),
-    Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
+    PrepareResult = dict:fetch(<<"transaction_prepare_result">>, Metadata),
 
-    MaximumObjectVersions = case Conflicts of
-                                false ->
+    MaximumObjectVersions = case PrepareResult of
+                                {prepared, _} ->
                                     app_helper:get_env(riak_kv, maximum_object_versions) - 1;
-                                true ->
+                                {aborted, _} ->
                                     app_helper:get_env(riak_kv, maximum_object_versions)
                             end,
 
@@ -336,15 +328,15 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
                       if
                           % Involved in the transaction
                           TransactionId == Id ->
-                              if
+                              case PrepareResult of
                                   % If transaction was committed
                                   % Commit tentative value by adding a version to it
-                                  Conflicts == false ->
-                                      NewM = dict:store(<<"version">>, Lsn, M),
+                                  {prepared, Timestamp} ->
+                                      NewM = dict:store(<<"version">>, Timestamp, M),
                                       {Versions, [C#r_content{metadata = NewM} | Rest]};
 
                                   % Else discard the tentative value
-                                  Conflicts == true ->
+                                  {aborted, _}->
                                       {Versions, Rest}
                               end;
 
@@ -368,12 +360,64 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
     {_, MergedContents} = lists:foldl(FoldFun, {0, []}, SortedContents),
     MergedContents.
 
+% Adds the new version to the object contents taking in account the maximum_object_versions
+new_version_append_merge_contents(
+  #r_object{contents = OldContents},
+  #r_object{contents = NewContents}
+) ->
+    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
+
+    % Sort OldContents in descending order
+    SortFun = fun(C1, C2) ->
+                      V1 = get_metadata_value(C1, <<"version">>, -1),
+                      V2 = get_metadata_value(C2, <<"version">>, -1),
+                      V1 >= V2
+              end,
+    SortedContents = lists:sort(SortFun, OldContents),
+
+    [NewContent] = NewContents,
+    MergedContents1 = [NewContent | SortedContents],
+
+    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
+                      case get_metadata_value(M, <<"version">>, -1) of
+                          % Temporary value
+                          -1 ->
+                              {Versions, [C | Rest]};
+                          % Committed value
+                          _ ->
+                              if
+                                  Versions < MaximumObjectVersions ->
+                                      {Versions + 1, [C | Rest]};
+                                  true ->
+                                      {Versions + 1, Rest}
+                              end
+                      end
+              end,
+    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, MergedContents1),
+    MergedContents.
+
+% Adds the tentative version to the object contents not taking in account the maximum_object_versions
+tentative_version_append_merge_contents(
+  #r_object{contents = OldContents},
+  #r_object{contents = NewContents}
+) ->
+    [NewContent] = NewContents,
+    [NewContent | OldContents].
+
 merge_contents(OldObject, NewObject, false) ->
     Metadata = get_metadata(NewObject),
 
-    Result = case dict:find(<<"transaction_conflicts">>, Metadata) of
-                 {ok, _} -> transaction_validation_merge_contents(OldObject, NewObject);
-                 error -> append_merge_contents(OldObject, NewObject) 
+    TransactionCommitAbort = dict:is_key(<<"transaction_prepare_result">>, Metadata),
+    NewVersionAppend = dict:is_key(<<"version">>, Metadata),
+    TentativeVersionAppend = true,
+
+    Result = if
+                 TransactionCommitAbort ->
+                    transaction_commit_abort_merge_contents(OldObject, NewObject);
+                 NewVersionAppend ->
+                    new_version_append_merge_contents(OldObject, NewObject);
+                 TentativeVersionAppend ->
+                    tentative_version_append_merge_contents(OldObject, NewObject) 
              end,
 
     {undefined, Result};

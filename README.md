@@ -1,6 +1,6 @@
 # riak_kv
 
-This is a fork of [riak_kv](https://github.com/basho/riak_kv) altered to have the functionality of EunomiaKV Plus. 
+This is a fork of [riak_kv](https://github.com/basho/riak_kv) altered to have support for transaction using the 2PC protocol. 
 
 ## Dependencies
 

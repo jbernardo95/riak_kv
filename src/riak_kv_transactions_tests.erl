@@ -5,10 +5,8 @@
 run(Vnodes) ->
     io:format("WARNING~n", []),
     io:format("The tests in this module assume the following deploy scenario and configuration:~n", []),
-    io:format("- 2 vnodes", []),
-    io:format("- transactions manager tree with 3 nodes~n", []),
-    io:format("- maximum_object_versions = 5 ~n", []),
-    io:format("- maximum_last_transactions = 10~n", []),
+    io:format("- 2 vnodes~n", []),
+    io:format("- maximum_object_versions = 5~n", []),
 
     blind_write_transaction(Vnodes),
     read_write_transaction(Vnodes),
@@ -17,7 +15,7 @@ run(Vnodes) ->
     read_write_conflict_transaction_2(Vnodes),
     write_write_conflict_transaction(Vnodes),
     test_maximum_object_versions(Vnodes),
-    test_maximum_last_transactions(Vnodes),
+    read_clock_increase(Vnodes),
     ok.
 
 % Initial state:
@@ -77,7 +75,7 @@ read_write_conflict_transaction_1([Vnode1, Vnode2]) ->
     {ok, Object} = riak_kv_transactional_client:get(Vnode1, <<"bucket">>, <<"a">>, Client1),
     3 = riak_object:get_value(Object),
 
-    ok = riak_kv_transactional_client:put(Vnode1,  <<"bucket">>, <<"a">>, 4, Client2),
+    ok = riak_kv_transactional_client:put(Vnode1, <<"bucket">>, <<"a">>, 4, Client2),
     timer:sleep(100),
 
     ok = riak_kv_transactional_client:put(Vnode2,  <<"bucket">>, <<"b">>, 3, Client1),
@@ -157,29 +155,29 @@ test_maximum_object_versions([Vnode | _]) ->
     {error, not_found} = riak_kv_transactional_client:get(Vnode, <<"bucket">>, <<"maximum_object_versions">>, Client2),
     ok = riak_kv_transactional_client:commit_transaction(Client2).
 
-% This test assumes maximum_last_transactions = 10
 % Initial state:
 % - a: (3, 2), (5, 3), (7, 4), (9, 5), (13, 6)
 % - b: (2, 1), (4, 2)
 % - c: (6, 1)
 % - maximum_object_versions: (15, 2), (17, 3), (19, 4), (21, 5), (23, 6)
 % Final state:
-% - a: (3, 2), (5, 3), (7, 4), (9, 5), (13, 6)
-% - b: (2, 1), (4, 2)
+% - a: (3, 2), (5, 3), (7, 4), (9, 5), (13, 6), (26, 7)
+% - b: (2, 1), (4, 2), (8, 3)
 % - c: (6, 1)
 % - maximum_object_versions: (15, 2), (17, 3), (19, 4), (21, 5), (23, 6)
-% - maximum_last_transactions: (35, 6), (37, 7), (39, 8), (41, 9), (43, 10)
-test_maximum_last_transactions([Vnode1, Vnode2]) ->
+read_clock_increase([Vnode1, Vnode2]) ->
     {ok, Client1} = riak_kv_transactional_client:start_link(Vnode1),
     {ok, Client2} = riak_kv_transactional_client:start_link(Vnode1),
 
-    lists:foreach(fun(I) ->
-                      ok = riak_kv_transactional_client:put(Vnode1, <<"bucket">>, <<"maximum_last_versions">>, I, Client1)
-                  end, lists:seq(1, 10)),
+    riak_kv_transactional_client:begin_transaction(Client1),
+    {ok, Object1} = riak_kv_transactional_client:get(Vnode1, <<"bucket">>, <<"maximum_object_versions">>, Client1),
+    6 = riak_object:get_value(Object1),
+
+    {ok, Object2} = riak_kv_transactional_client:get(Vnode2, <<"bucket">>, <<"b">>, Client1),
+    2 = riak_object:get_value(Object2),
+
+    ok = riak_kv_transactional_client:put(Vnode2, <<"bucket">>, <<"b">>, 3, Client2),
     timer:sleep(100),
 
-    riak_kv_transactional_client:begin_transaction(Client2),
-    {ok, Object} = riak_kv_transactional_client:get(Vnode1, <<"bucket">>, <<"a">>, Client2),
-    6 = riak_object:get_value(Object),
-    ok = riak_kv_transactional_client:put(Vnode2,  <<"bucket">>, <<"b">>, 3, Client2),
-    {error, aborted} = riak_kv_transactional_client:commit_transaction(Client2).
+    ok = riak_kv_transactional_client:put(Vnode1, <<"bucket">>, <<"a">>, 7, Client1),
+    {error, aborted} = riak_kv_transactional_client:commit_transaction(Client1).
