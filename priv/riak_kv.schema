@@ -797,13 +797,6 @@
     {commented, 5}
 ]}.
 
-%% @doc Specifies the backend used by the transactions manager
-{mapping, "transactions_manager.backend", "riak_kv.transactions_manager_backend", [
-    {datatype, atom},
-    {default, tree},
-    {commented, tree}
-]}.
-
 %% @doc Specifies the number of nodes of the transaction managers tree
 {mapping, "transactions_manager.tree.n_nodes", "riak_kv.transactions_manager_tree_n_nodes", [
     {datatype, integer},
