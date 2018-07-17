@@ -3,7 +3,7 @@
 -behaviour(gen_server).
 
 -export([start_link/0,
-         connect_to_vnodes_cluster/1,
+         connect_to_vnodes_cluster/0,
          validate_and_commit/6]).
 
 -export([init/1,
@@ -26,8 +26,8 @@
 start_link() ->
     gen_server:start_link({global, ?MODULE}, ?MODULE, [], []).
 
-connect_to_vnodes_cluster(VnodeClusterGatewayNode) ->
-    gen_server:cast({global, ?MODULE}, {connect_to_vnodes_cluster, VnodeClusterGatewayNode}).
+connect_to_vnodes_cluster() ->
+    gen_server:cast({global, ?MODULE}, connect_to_vnodes_cluster).
 
 validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
     gen_server:cast({global, ?MODULE}, {validate_and_commit, TransactionId, Snapshot, Gets, Puts, NValidations, Client}).
@@ -48,8 +48,8 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({connect_to_vnodes_cluster, VnodeClusterGatewayNode}, State) ->
-    do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State);
+handle_cast(connect_to_vnodes_cluster, State) ->
+    do_connect_to_vnodes_cluster(State);
 
 handle_cast({validate_and_commit, TransactionId, Snapshot, Gets, Puts, NValidations, Client}, State) ->
     do_validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
@@ -70,12 +70,18 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
-    {ok, Ring} = rpc:call(VnodeClusterGatewayNode, riak_core_ring_manager, get_raw_ring, []),
-    {_RingSize, Vnodes1} = element(4, Ring),
-    Vnodes = lists:usort(fun({_, A}, {_, B}) -> A =< B end, Vnodes1),
-    ets:insert(?RIAK_RING, Vnodes),
-    {noreply, State}.
+do_connect_to_vnodes_cluster(State) ->
+    {ok, VnodeClusterGatewayNode} = application:get_env(riak_kv, vnode_cluster_gateway_node),
+    case net_adm:ping(VnodeClusterGatewayNode) of
+        pong ->
+            {ok, Ring} = rpc:call(VnodeClusterGatewayNode, riak_core_ring_manager, get_raw_ring, []),
+            {_RingSize, Vnodes1} = element(4, Ring),
+            Vnodes = lists:usort(fun({_, A}, {_, B}) -> A =< B end, Vnodes1),
+            ets:insert(?RIAK_RING, Vnodes),
+            {noreply, State};
+        pang ->
+            {stop, vnode_cluster_gateway_node_unreachable, State}
+    end.
 
 do_validate_and_commit(
   TransactionId, Snapshot1, Gets1, Puts1, NValidations, Client,
@@ -101,10 +107,17 @@ do_validate_and_commit(
     [{TransactionId, Snapshot, Gets, Puts, Lsn, ReceivedValidations}] = ets:lookup(?RUNNING_TRANSACTIONS, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            lager:info("Validation in progress...~n", []),
             NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-            Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+            BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
+            if
+                BlindWrite ->
+                    Conflicts = false,
+                    lager:info("Blind write, conflicts false~n", []);
+                true ->
+                    lager:info("Validation in progress...~n", []),
+                    Conflicts = check_conflicts(Gets, NbkeyPuts, Snapshot),
+                    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
+            end,
 
             send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts),
             send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),

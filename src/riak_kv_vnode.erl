@@ -28,9 +28,9 @@
 -export([test_vnode/1, put/7]).
 -export([start_vnode/1,
          start_vnodes/1,
+         transactional_get/4,
          commit_transaction/6,
          transaction_validation/5,
-         transactional_get/4,
          get/3,
          get/4,
          del/3,
@@ -248,16 +248,16 @@ start_vnodes(IdxList) ->
 test_vnode(I) ->
     riak_core_vnode:start_link(riak_kv_vnode, I, infinity).
 
+transactional_get(Preflist, BKey, Snapshot, ReadOnly) ->
+    Request = riak_kv_requests:new_transactional_get_request(BKey, Snapshot, ReadOnly),
+    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
+
 commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations) ->
     Request = riak_kv_requests:new_commit_transaction_request(Id, Snapshot, Gets, Puts, NValidations),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 transaction_validation(Preflist, Id, Puts, Conflicts, Lsn) ->
     Request = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
-    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
-
-transactional_get(Preflist, BKey, Snapshot, ReadOnly) ->
-    Request = riak_kv_requests:new_transactional_get_request(BKey, Snapshot, ReadOnly),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 get(PreflistOrVnodePid, BKey, ReqId) ->
@@ -545,11 +545,11 @@ init([Index]) ->
 handle_overload_command(Req, Sender, Idx) ->
     handle_overload_request(riak_kv_requests:request_type(Req), Req, Sender, Idx).
 
+handle_overload_request(kv_transactional_get_request, _Req, Sender, Idx) ->
+    erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
 handle_overload_request(kv_transaction_validation_request, _Req, Sender, Idx) ->
-    erlang:send(Sender, {error, overload, Idx});
-handle_overload_request(kv_transactional_get_request, _Req, Sender, Idx) ->
     erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
@@ -789,14 +789,14 @@ handle_command(Req, Sender, State) ->
 
 %% @todo: pre record encapsulation there was no catch all clause in handle_command,
 %%        so crashing on unknown should work.
+handle_request(kv_transactional_get_request, Req, Sender, State) ->
+    NewState = handle_transactional_get_request(Req, Sender, State),
+    {noreply, NewState};
 handle_request(kv_commit_transaction_request, Req, Sender, State) ->
     NewState = handle_commit_transaction_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_transaction_validation_request, Req, Sender, State) ->
     NewState = handle_transaction_validation_request(Req, Sender, State),
-    {noreply, NewState};
-handle_request(kv_transactional_get_request, Req, Sender, State) ->
-    NewState = handle_transactional_get_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
@@ -1337,89 +1337,12 @@ handle_exit(_Pid, Reason, State) ->
     lager:error("Linked process exited. Reason: ~p", [Reason]),
     {stop, linked_process_crash, State}.
 
-%% Optional Callback. A node is about to exit. Ensure that this node doesn't
-%% have any current ensemble members.
-ready_to_exit() ->
-    [] =:= riak_kv_ensembles:local_ensembles().
-
-%% @private
-forward_put({Idx, Node}, Key, Obj, From) ->
-    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
-    riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_put, Key, Obj, From}),
-    ok.
-
-%% @private
-forward_get({Idx, Node}, Key, From) ->
-    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
-    riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_get, Key, From}),
-    ok.
-
-%% @private
-raw_put({Idx, Node}, Key, Obj) ->
-    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
-    %% Note: This cannot be bang_unreliable. Don't change.
-    Proxy ! {raw_put, Key, Obj},
-    ok.
-
-%% @private
-handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
-
-    % Save puts as temporary
-    Puts = riak_kv_requests:get_puts(Req),
-    FoldFun = fun(Object, State1) ->
-                      Bkey = riak_object:bkey(Object),
-                      {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
-                      State2
-              end,
-    NewState = lists:foldl(FoldFun, State, Puts),
-
-    % Send transaction to the transactions manager for validation
-    TransactionId = riak_kv_requests:get_id(Req),
-    Snapshot = riak_kv_requests:get_snapshot(Req),
-    Gets = riak_kv_requests:get_gets(Req),
-    NValidations = riak_kv_requests:get_n_validations(Req),
-    riak_kv_transactions_manager:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
-
-    NewState.
-
-handle_transaction_validation_request(Req, _Sender, #state{idx = Idx,
-    pending_transactional_gets = PendingTransactionalGets} = State) ->
-
-    lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
-    
-    Id = riak_kv_requests:get_id(Req),
-    Puts = riak_kv_requests:get_puts(Req),
-    Conflicts = riak_kv_requests:get_conflicts(Req),
-    Lsn = riak_kv_requests:get_lsn(Req),
-
-    Metadata2 = dict:store(<<"transaction_id">>, Id, dict:new()),
-    Metadata1 = dict:store(<<"transaction_conflicts">>, Conflicts, Metadata2),
-    Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
-
-    % Commit or discard each temporary put
-    NewState1 = lists:foldl(fun({Bucket, Key} = Bkey, AccState1) ->
-                                   Object1 = riak_object:new(Bucket, Key, nil),
-                                   Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
-                                   {_, AccState2} = do_put(Bkey, Object, 0, 0, [], AccState1),
-                                   AccState2
-                           end, State, Puts),
-
-    % Handle pending transactional get requests
-    NewState = case ets:lookup(PendingTransactionalGets, Id) of
-                   [{Id, PendingTransactionalGetRequests}] ->
-                       lists:foldl(fun({Req1, Sender1}, AccState) ->
-                                           handle_transactional_get_request(Req1, Sender1, AccState)
-                                   end, NewState1, PendingTransactionalGetRequests);
-                   [] -> NewState1
-               end,
-    ets:delete(PendingTransactionalGets, Id),
-
-    NewState.
-
-handle_transactional_get_request(Req, Sender, #state{idx = Idx,
-    pending_transactional_gets = PendingTransactionalGets} = State) ->
-
+handle_transactional_get_request(
+  Req,
+  Sender,
+  #state{idx = Idx,
+         pending_transactional_gets = PendingTransactionalGets} = State
+) ->
     lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     Bkey = riak_kv_requests:get_bucket_key(Req),
@@ -1535,6 +1458,88 @@ select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
                         end
                 end,
     lists:foldl(SelectFun, nil, Contents).
+
+handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    % Save puts as temporary
+    Puts = riak_kv_requests:get_puts(Req),
+    FoldFun = fun(Object, State1) ->
+                      Bkey = riak_object:bkey(Object),
+                      {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
+                      State2
+              end,
+    NewState = lists:foldl(FoldFun, State, Puts),
+
+    % Send transaction to the transactions manager for validation
+    TransactionId = riak_kv_requests:get_id(Req),
+    Snapshot = riak_kv_requests:get_snapshot(Req),
+    Gets = riak_kv_requests:get_gets(Req),
+    NValidations = riak_kv_requests:get_n_validations(Req),
+    riak_kv_transactions_sequencer:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
+
+    NewState.
+
+handle_transaction_validation_request(
+  Req,
+  _Sender,
+  #state{idx = Idx,
+         pending_transactional_gets = PendingTransactionalGets} = State
+) ->
+    lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
+    
+    Id = riak_kv_requests:get_id(Req),
+    Puts = riak_kv_requests:get_puts(Req),
+    Conflicts = riak_kv_requests:get_conflicts(Req),
+    Lsn = riak_kv_requests:get_lsn(Req),
+
+    Metadata2 = dict:store(<<"transaction_id">>, Id, dict:new()),
+    Metadata1 = dict:store(<<"transaction_conflicts">>, Conflicts, Metadata2),
+    Metadata = dict:store(<<"transaction_lsn">>, Lsn, Metadata1),
+
+    % Commit or discard each temporary put
+    NewState1 = lists:foldl(fun({Bucket, Key} = Bkey, AccState1) ->
+                                   Object1 = riak_object:new(Bucket, Key, nil),
+                                   Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
+                                   {_, AccState2} = do_put(Bkey, Object, 0, 0, [], AccState1),
+                                   AccState2
+                           end, State, Puts),
+
+    % Handle pending transactional get requests
+    NewState = case ets:lookup(PendingTransactionalGets, Id) of
+                   [{Id, PendingTransactionalGetRequests}] ->
+                       lists:foldl(fun({Req1, Sender1}, AccState) ->
+                                           handle_transactional_get_request(Req1, Sender1, AccState)
+                                   end, NewState1, PendingTransactionalGetRequests);
+                   [] -> NewState1
+               end,
+    ets:delete(PendingTransactionalGets, Id),
+
+    NewState.
+
+%% Optional Callback. A node is about to exit. Ensure that this node doesn't
+%% have any current ensemble members.
+ready_to_exit() ->
+    [] =:= riak_kv_ensembles:local_ensembles().
+
+%% @private
+forward_put({Idx, Node}, Key, Obj, From) ->
+    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
+    riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_put, Key, Obj, From}),
+    ok.
+
+%% @private
+forward_get({Idx, Node}, Key, From) ->
+    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
+    riak_core_send_msg:bang_unreliable(Proxy, {raw_forward_get, Key, From}),
+    ok.
+
+%% @private
+raw_put({Idx, Node}, Key, Obj) ->
+    Proxy = riak_core_vnode_proxy:reg_name(riak_kv_vnode, Idx, Node),
+    %% Note: This cannot be bang_unreliable. Don't change.
+    Proxy ! {raw_put, Key, Obj},
+    ok.
 
 %% @private
 do_put(Request, State) ->

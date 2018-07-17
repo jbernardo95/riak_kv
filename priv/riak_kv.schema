@@ -797,51 +797,9 @@
     {commented, 5}
 ]}.
 
-%% @doc Specifies the backend used by the transactions manager
-{mapping, "transactions_manager.backend", "riak_kv.transactions_manager_backend", [
-    {datatype, atom},
-    {default, tree},
-    {commented, tree}
-]}.
-
-%% @doc Specifies the number of nodes of the transaction managers tree
-{mapping, "transactions_manager.tree.n_nodes", "riak_kv.transactions_manager_tree_n_nodes", [
-    {datatype, integer},
-    {default, 3},
-    {commented, 3}
-]}.
-
-%% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster
-{mapping, "transactions_manager.vnode_cluster_gateway_node", "riak_kv.vnode_cluster_gateway_node", [
+%% @doc Specifies the Erlang node that the sequencer should use to get information about the vnode cluster
+{mapping, "sequencer.vnode_cluster_gateway_node", "riak_kv.vnode_cluster_gateway_node", [
     {datatype, atom},
     {default, 'riak@127.0.0.1'},
     {commented, 'riak@127.0.0.1'}
-]}.
-
-%% @doc Specifies the maximum number of transactions kept by the transactions validators
-{mapping, "transactions_manager.validator.maximum_last_transactions", "riak_kv.transactions_validator_maximum_last_transactions", [
-    {datatype, integer},
-    {default, 1000},
-    {commented, 1000}
-]}.
-
-%% @doc Specifies the path where transaction log files will be stored
-{mapping, "transactions_manager.log.data_path", "riak_kv.transactions_log.data_path", [
-    {datatype, directory},
-    {default, "$(platform_data_dir)/transactions_log"},
-    hidden
-]}.
-
-%% @doc Specifies the maximum number of bytes each log file can have
-{mapping, "transactions_manager.log.max_n_bytes", "riak_kv.transactions_log.max_n_bytes", [
-    {datatype, integer},
-    {default, 1000000000},
-    {commented, 1000000000}
-]}.
-
-%% @doc Specifies the maximum number of log files that the transactions log can have  
-{mapping, "transactions_manager.log.max_n_files", "riak_kv.transactions_log.max_n_files", [
-    {datatype, integer},
-    {default, 10},
-    {commented, 10}
 ]}.

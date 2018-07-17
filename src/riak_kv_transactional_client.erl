@@ -72,7 +72,7 @@ handle_call(
     Conflict = check_get_conflict(GetResult, Snapshot),
     if
         Conflict ->
-            Reply = {error, aborted},
+            Reply = commit_reply(true),
             NewState = clean_transaction_state(NewState1),
             {reply, Reply, NewState};
         true ->
@@ -247,10 +247,6 @@ check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_metadata_value(Object, <<"version">>, -1) > Snapshot;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
-commit_reply(true) -> {error, aborted};
-commit_reply(false) -> ok;
-commit_reply(_) -> error.
-
 create_object(Node, Bucket, Key, Value, Id, TentativeVersion) ->
     Object = riak_object:new(Node, Bucket, Key),
     Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
@@ -279,3 +275,6 @@ do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = {_, [Node, _]}} 
         {error, _Reason} = Reply ->
             {reply, Reply, State}
     end.
+
+commit_reply(false) -> ok;
+commit_reply(true) -> {error, aborted}.
