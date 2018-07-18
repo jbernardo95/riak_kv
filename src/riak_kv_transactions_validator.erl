@@ -123,8 +123,7 @@ leaf_validate(
             ok
     end,
 
-    Record = riak_kv_transactions_log:new_log_record(Lsn, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}),
-    riak_kv_transactions_log:append(Id, Record),
+    riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
 
     NewState = State#state{next_lsn = Lsn + Step},
     {noreply, NewState}.

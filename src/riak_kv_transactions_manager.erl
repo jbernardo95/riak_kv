@@ -30,14 +30,11 @@ validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client) -
 init(Id) ->
     Validator = {riak_kv_transactions_validator,
                  {riak_kv_transactions_validator, start_link, [Id]}, permanent, 5000, worker, [riak_kv_transactions_validator]},
-    Log = {riak_kv_transactions_log,
-           {riak_kv_transactions_log, start_link, [Id]},
-           permanent, 5000, worker, [riak_kv_transactions_log]},
     Committer = {riak_kv_transactions_committer,
                  {riak_kv_transactions_committer, start_link, [Id]},
                  permanent, 5000, worker, [riak_kv_transactions_committer]},
 
-    ChildSpecs = [Validator, Log, Committer],
+    ChildSpecs = [Validator, Committer],
     SupFlags = {one_for_one, 10, 10},
 
     {ok, {SupFlags, ChildSpecs}}.
