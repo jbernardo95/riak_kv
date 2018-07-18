@@ -1340,10 +1340,10 @@ handle_exit(_Pid, Reason, State) ->
 handle_transactional_get_request(
   Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          pending_transactional_gets = PendingTransactionalGets} = State
 ) ->
-    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     Bkey = riak_kv_requests:get_bucket_key(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1364,7 +1364,7 @@ handle_transactional_get_request(
                                     % Selected content has not yet been committed
                                     % So save the request as pending until the transaction is committed
                                     TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
-                                    lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+                                    %lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
 
                                     case ets:lookup(PendingTransactionalGets, TransactionId) of
                                         [{TransactionId, PendingTransactionalGets}] ->
@@ -1459,8 +1459,8 @@ select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
                 end,
     lists:foldl(SelectFun, nil, Contents).
 
-handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+handle_commit_transaction_request(Req, Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     % Save puts as temporary
     Puts = riak_kv_requests:get_puts(Req),
@@ -1483,10 +1483,10 @@ handle_commit_transaction_request(Req, Sender, #state{idx = Idx} = State) ->
 handle_transaction_validation_request(
   Req,
   _Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          pending_transactional_gets = PendingTransactionalGets} = State
 ) ->
-    lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
     Puts = riak_kv_requests:get_puts(Req),
