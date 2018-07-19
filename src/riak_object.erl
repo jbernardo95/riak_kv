@@ -303,70 +303,11 @@ merge_write_once(OldObject, NewObject) ->
             NewObject
     end.
 
-transaction_commit_abort_merge_contents(#r_object{contents = OldContents}, NewObject) ->
-    Metadata = get_metadata(NewObject),
-    Id = dict:fetch(<<"transaction_id">>, Metadata),
-    PrepareResult = dict:fetch(<<"transaction_prepare_result">>, Metadata),
-
-    MaximumObjectVersions = case PrepareResult of
-                                {prepared, _} ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions) - 1;
-                                {aborted, _} ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions)
-                            end,
-
-    % Sort OldContents in descending order
-    SortFun = fun(C1, C2) ->
-                      V1 = get_metadata_value(C1, <<"version">>, -1),
-                      V2 = get_metadata_value(C2, <<"version">>, -1),
-                      V1 >= V2
-              end,
-    SortedContents = lists:sort(SortFun, OldContents),
-
-    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
-                      TransactionId = dict:fetch(<<"transaction_id">>, M),
-                      if
-                          % Involved in the transaction
-                          TransactionId == Id ->
-                              case PrepareResult of
-                                  % If transaction was committed
-                                  % Commit tentative value by adding a version to it
-                                  {prepared, Timestamp} ->
-                                      NewM = dict:store(<<"version">>, Timestamp, M),
-                                      {Versions, [C#r_content{metadata = NewM} | Rest]};
-
-                                  % Else discard the tentative value
-                                  {aborted, _}->
-                                      {Versions, Rest}
-                              end;
-
-                          % Not involved in the transaction
-                          true ->
-                              case get_metadata_value(M, <<"version">>, -1) of
-                                  % Temporary value
-                                  -1 ->
-                                      {Versions, [C | Rest]};
-                                  % Committed value
-                                  _ ->
-                                      if
-                                          Versions < MaximumObjectVersions ->
-                                              {Versions + 1, [C | Rest]};
-                                          true ->
-                                              {Versions + 1, Rest}
-                                      end
-                              end
-                      end
-              end,
-    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, SortedContents),
-    MergedContents.
-
 % Adds the new version to the object contents taking in account the maximum_object_versions
 new_version_append_merge_contents(
   #r_object{contents = OldContents},
   #r_object{contents = NewContents}
 ) ->
-    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
-
     % Sort OldContents in descending order
     SortFun = fun(C1, C2) ->
                       V1 = get_metadata_value(C1, <<"version">>, -1),
@@ -376,50 +317,13 @@ new_version_append_merge_contents(
     SortedContents = lists:sort(SortFun, OldContents),
 
     [NewContent] = NewContents,
-    MergedContents1 = [NewContent | SortedContents],
+    MergedContents = [NewContent | SortedContents],
 
-    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
-                      case get_metadata_value(M, <<"version">>, -1) of
-                          % Temporary value
-                          -1 ->
-                              {Versions, [C | Rest]};
-                          % Committed value
-                          _ ->
-                              if
-                                  Versions < MaximumObjectVersions ->
-                                      {Versions + 1, [C | Rest]};
-                                  true ->
-                                      {Versions + 1, Rest}
-                              end
-                      end
-              end,
-    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, MergedContents1),
-    MergedContents.
-
-% Adds the tentative version to the object contents not taking in account the maximum_object_versions
-tentative_version_append_merge_contents(
-  #r_object{contents = OldContents},
-  #r_object{contents = NewContents}
-) ->
-    [NewContent] = NewContents,
-    [NewContent | OldContents].
+    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
+    lists:sublist(MergedContents, MaximumObjectVersions).
 
 merge_contents(OldObject, NewObject, false) ->
-    Metadata = get_metadata(NewObject),
-
-    TransactionCommitAbort = dict:is_key(<<"transaction_prepare_result">>, Metadata),
-    NewVersionAppend = dict:is_key(<<"version">>, Metadata),
-    TentativeVersionAppend = true,
-
-    Result = if
-                 TransactionCommitAbort ->
-                    transaction_commit_abort_merge_contents(OldObject, NewObject);
-                 NewVersionAppend ->
-                    new_version_append_merge_contents(OldObject, NewObject);
-                 TentativeVersionAppend ->
-                    tentative_version_append_merge_contents(OldObject, NewObject) 
-             end,
-
+    Result = new_version_append_merge_contents(OldObject, NewObject),
     {undefined, Result};
 
 %% @doc Merge the r_objects contents by converting the inner dict to

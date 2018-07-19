@@ -147,7 +147,8 @@
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
                 two_phase_commit_server :: pid(),
-                pending_transactional_gets :: ets:tab()}).
+                pending_transactional_gets :: ets:tab(),
+                tentative_versions :: ets:tab()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -496,6 +497,7 @@ init([Index]) ->
         end,
     {ok, TwoPhaseCommitServer} = riak_kv_transactions_2pc:start_link(), 
     PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
+    TentativeVersions = ets:new(tentative_versions, []), 
 
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
@@ -524,7 +526,8 @@ init([Index]) ->
                            md_cache_size = MDCacheSize,
                            update_hook = update_hook(),
                            two_phase_commit_server = TwoPhaseCommitServer,
-                           pending_transactional_gets = PendingTransactionalGets},
+                           pending_transactional_gets = PendingTransactionalGets,
+                           tentative_versions = TentativeVersions},
 
             try_set_vnode_lock_limit(Index),
 
@@ -1355,7 +1358,8 @@ handle_transactional_get_request(
   Sender,
   #state{idx = Idx, 
          two_phase_commit_server = TwoPhaseCommitServer,
-         pending_transactional_gets = PendingTransactionalGets} = State
+         pending_transactional_gets = PendingTransactionalGets,
+         tentative_versions = TentativeVersions} = State
 ) ->
     lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
@@ -1366,8 +1370,13 @@ handle_transactional_get_request(
     {reply, {r, Retval, _, _}, State2} = do_get(undefined, Bkey, undefined, State),
     Reply = case Retval of
                 {ok, Object} ->
+                    Bkey = riak_object:bkey(Object),
                     ObjectContents = riak_object:get_contents(Object),
-                    SnapshotConsistentContent = select_snapshot_consistent_content(ObjectContents, Snapshot, ReadOnly),
+                    TentativeContents = case ets:lookup(TentativeVersions, Bkey) of
+                                            [{Bkey, TentativeContents1}] -> TentativeContents1;
+                                            [] -> []
+                                        end,
+                    SnapshotConsistentContent = select_snapshot_consistent_content(ObjectContents ++ TentativeContents, Snapshot, ReadOnly),
                     if
                         SnapshotConsistentContent == nil ->
                             {error, not_found};
@@ -1479,7 +1488,8 @@ handle_prepare_transaction_request(
   Req,
   Sender,
   #state{idx = Idx,
-         two_phase_commit_server = TwoPhaseCommitServer} = State
+         two_phase_commit_server = TwoPhaseCommitServer,
+         tentative_versions = TentativeVersions} = State
 ) ->
     lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
@@ -1492,26 +1502,32 @@ handle_prepare_transaction_request(
     PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts),
 
     % Save puts as tentative if locks are acquired and there are no conflicts
-    NewState = case PrepareResult of
-                   {prepared, _} ->
-                       FoldFun = fun(Object, State1) ->
-                                         Bkey = riak_object:bkey(Object),
-                                         {_, State2} = do_put(Bkey, Object, 0, 0, [], State1),
-                                         State2
-                                 end,
-                       lists:foldl(FoldFun, State, Puts);
-                    _ -> State
-               end,
+    case PrepareResult of
+        {prepared, _} ->
+            lists:foreach(fun(Object) ->
+                                  Bkey = riak_object:bkey(Object),
+                                  [TentativeContent] = riak_object:get_contents(Object),
+                                  case ets:lookup(TentativeVersions, Bkey) of
+                                      [{Bkey, TentativeContents}] ->
+                                          ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
+                                      [] ->
+                                          ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
+                                  end
+                          end, Puts);
+        _ ->
+            ok
+    end,
     
     riak_core_vnode:reply(Sender, {prepare_result, PrepareResult}),
-    NewState.
+    State.
 
 handle_commit_transaction_request(
   Req,
   Sender,
   #state{idx = Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
-         pending_transactional_gets = PendingTransactionalGets} = State
+         pending_transactional_gets = PendingTransactionalGets,
+         tentative_versions = TentativeVersions} = State
 ) ->
     lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
     
@@ -1522,16 +1538,50 @@ handle_commit_transaction_request(
 
     ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, Puts, PrepareResult),
 
-    % Commit or discard each tentative put
-    Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
-    Metadata = dict:store(<<"transaction_prepare_result">>, PrepareResult, Metadata1),
-    NewState1 = lists:foldl(fun({_Node, Bucket, Key}, AccState1) ->
-                                    Object1 = riak_object:new(Bucket, Key, nil),
-                                    Object = riak_object:set_contents(Object1, [{Metadata, nil}]),
-                                    {_, AccState2} = do_put({Bucket, Key}, Object, 0, 0, [], AccState1),
-                                    AccState2
-                            end, State, Puts),
-                           
+    case PrepareResult of
+        % Commit tentative versions to disk
+        {prepared, Timestamp} ->
+            FoldFun = fun({_Node, Bucket, Key}, Acc) ->
+                          Bkey = {Bucket, Key},
+                          TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                          FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
+                                             TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                             if
+                                                 TransactionId == Id -> {Content, NewTentativeContents1};
+                                                 true -> {ContentToCommit1, [Content | NewTentativeContents1]}
+                                             end
+                                     end,
+                          {ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
+
+                          {Metadata, Value} = ContentToCommit,
+                          Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
+                          Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                          Object1 = riak_object:new(Bucket, Key, nil),
+                          Object = riak_object:set_contents(Object1, [{Metadata2, Value}]),
+                          {_, NewAcc} = do_put(Bkey, Object, 0, 0, [], Acc),
+
+                          ets:insert(TentativeVersions, {Bkey, NewTentativeContents}),
+
+                          NewAcc
+                      end,
+            NewState1 = lists:foldl(FoldFun, State, Puts);
+
+        % Delete tentative versions from memory
+        _ ->
+            ForeachFun = fun({_Node, Bucket, Key}) ->
+                             Bkey = {Bucket, Key},
+                             TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                             FilterFun = fun(Content) ->
+                                             TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                             TransactionId /= Id
+                                         end,
+                             NewTentativeContents = lists:filter(FilterFun, TentativeContents),
+                             ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+                          end,
+            lists:foreach(ForeachFun, Puts),
+            NewState1 = State
+    end,
+
     riak_core_vnode:reply(Sender, {commit_result, ok}),
 
     % Handle pending transactional get requests
@@ -1567,11 +1617,11 @@ handle_prepare_commit_transaction_request(
     NewState = case PrepareResult of
                    {prepared, Timestamp} ->
                        FoldFun = fun(Object, State1) ->
+                                         Bkey = riak_object:bkey(Object),
                                          [{Metadata, Value}] = riak_object:get_contents(Object),
                                          Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
                                          Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
                                          Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
-                                         Bkey = riak_object:bkey(Object1),
                                          {_, State2} = do_put(Bkey, Object1, 0, 0, [], State1),
                                          State2
                                  end,
