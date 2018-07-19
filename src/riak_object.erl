@@ -303,26 +303,11 @@ merge_write_once(OldObject, NewObject) ->
             NewObject
     end.
 
-append_merge_contents(
+% Adds the new version to the object contents taking in account the maximum_object_versions
+new_version_append_merge_contents(
   #r_object{contents = OldContents},
   #r_object{contents = NewContents}
 ) ->
-    [NewContent] = NewContents,
-    [NewContent | OldContents].
-
-transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObject) ->
-    Metadata = get_metadata(NewObject),
-    Id = dict:fetch(<<"transaction_id">>, Metadata),
-    Conflicts = dict:fetch(<<"transaction_conflicts">>, Metadata),
-    Lsn = dict:fetch(<<"transaction_lsn">>, Metadata),
-
-    MaximumObjectVersions = case Conflicts of
-                                false ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions) - 1;
-                                true ->
-                                    app_helper:get_env(riak_kv, maximum_object_versions)
-                            end,
-
     % Sort OldContents in descending order
     SortFun = fun(C1, C2) ->
                       V1 = get_metadata_value(C1, <<"version">>, -1),
@@ -331,51 +316,14 @@ transaction_validation_merge_contents(#r_object{contents = OldContents}, NewObje
               end,
     SortedContents = lists:sort(SortFun, OldContents),
 
-    FoldFun = fun(#r_content{metadata = M} = C, {Versions, Rest}) ->
-                      TransactionId = dict:fetch(<<"transaction_id">>, M),
-                      if
-                          % Involved in the transaction
-                          TransactionId == Id ->
-                              if
-                                  % If transaction was committed
-                                  % Commit tentative value by adding a version to it
-                                  Conflicts == false ->
-                                      NewM = dict:store(<<"version">>, Lsn, M),
-                                      {Versions, [C#r_content{metadata = NewM} | Rest]};
+    [NewContent] = NewContents,
+    MergedContents = [NewContent | SortedContents],
 
-                                  % Else discard the tentative value
-                                  Conflicts == true ->
-                                      {Versions, Rest}
-                              end;
-
-                          % Not involved in the transaction
-                          true ->
-                              case get_metadata_value(M, <<"version">>, -1) of
-                                  % Temporary value
-                                  -1 ->
-                                      {Versions, [C | Rest]};
-                                  % Committed value
-                                  _ ->
-                                      if
-                                          Versions < MaximumObjectVersions ->
-                                              {Versions + 1, [C | Rest]};
-                                          true ->
-                                              {Versions + 1, Rest}
-                                      end
-                              end
-                      end
-              end,
-    {_, MergedContents} = lists:foldl(FoldFun, {0, []}, SortedContents),
-    MergedContents.
+    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
+    lists:sublist(MergedContents, MaximumObjectVersions).
 
 merge_contents(OldObject, NewObject, false) ->
-    Metadata = get_metadata(NewObject),
-
-    Result = case dict:find(<<"transaction_conflicts">>, Metadata) of
-                 {ok, _} -> transaction_validation_merge_contents(OldObject, NewObject);
-                 error -> append_merge_contents(OldObject, NewObject) 
-             end,
-
+    Result = new_version_append_merge_contents(OldObject, NewObject),
     {undefined, Result};
 
 %% @doc Merge the r_objects contents by converting the inner dict to
