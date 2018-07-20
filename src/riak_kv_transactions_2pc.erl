@@ -93,19 +93,19 @@ do_prepare(
                 end,
     NewState = do_move_clock_forward(Timestamp, State),
 
-    lager:info("Trying to acquire locks...~n", []),
+    %lager:info("Trying to acquire locks...~n", []),
     LockConflicts = check_lock_conflicts(Objects, LocksTable),
     if
         LockConflicts ->
-            lager:info("Locks not acquired, aborting~n", []),
+            %lager:info("Locks not acquired, aborting~n", []),
             {reply, {aborted, Timestamp}, NewState};
         true ->
-            lager:info("Locks acquired, checking version conflicts...~n", []),
+            %lager:info("Locks acquired, checking version conflicts...~n", []),
             VersionConflicts = if
                                    BlindWrite -> false;
                                    true -> check_version_conflicts(Snapshot, Objects, ObjectVersionsTable)
                                end,
-            lager:info("Conflicts: ~p~n", [VersionConflicts]),
+            %lager:info("Conflicts: ~p~n", [VersionConflicts]),
             if
                 VersionConflicts ->
                     {reply, {aborted, Timestamp}, NewState};
@@ -126,10 +126,10 @@ do_commit(
                    {prepared, Timestamp} ->
                        lists:foreach(fun(Nbkey) -> ets:insert(ObjectVersionsTable, {Nbkey, Timestamp}) end, Puts),
                        NewState1 = do_move_clock_forward(Timestamp, State),
-                       lager:info("Transaction committed~n", []),
+                       %lager:info("Transaction committed~n", []),
                        NewState1;
                    _ ->
-                       lager:info("Transaction aborted~n", []),
+                       %lager:info("Transaction aborted~n", []),
                        State
                end,
 
