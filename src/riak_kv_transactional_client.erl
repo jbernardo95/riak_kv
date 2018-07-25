@@ -15,8 +15,6 @@
 	     init/1,
 	     terminate/2]).
 
--define(DEFAULT_TIMEOUT, 60000).
-
 -record(state, {client,
                 clock,
                 in_transaction,
@@ -33,16 +31,16 @@ start_link(Node) ->
     gen_server:start_link(?MODULE, Node, []).
 
 get(Node, Bucket, Key, Client) when is_binary(Bucket), is_binary(Key) ->
-    gen_server:call(Client, {get, Node, Bucket, Key}, ?DEFAULT_TIMEOUT).
+    gen_server:call(Client, {get, Node, Bucket, Key}, infinity).
 
 put(Node, Bucket, Key, Value, Client) when is_binary(Bucket), is_binary(Key) ->
-    gen_server:call(Client, {put, Node, Bucket, Key, Value}, ?DEFAULT_TIMEOUT).
+    gen_server:call(Client, {put, Node, Bucket, Key, Value}, infinity).
 
 begin_transaction(Client) ->
-    gen_server:call(Client, begin_transaction, ?DEFAULT_TIMEOUT).
+    gen_server:call(Client, begin_transaction, infinity).
 
 commit_transaction(Client) ->
-    gen_server:call(Client, commit_transaction, ?DEFAULT_TIMEOUT).
+    gen_server:call(Client, commit_transaction, infinity).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -245,6 +243,7 @@ maybe_update_clock(_GetResult, State) -> State.
 
 check_get_conflict({ok, Object}, Snapshot) ->
     riak_object:get_metadata_value(Object, <<"version">>, -1) > Snapshot;
+check_get_conflict({error, conflict}, _Snapshot) -> true;
 check_get_conflict(_GetResult, _Snapshot) -> false.
 
 create_object(Node, Bucket, Key, Value, Id, TentativeVersion) ->

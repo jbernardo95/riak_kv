@@ -1369,22 +1369,28 @@ handle_transactional_get_request(
                         true ->
                             Version = riak_object:get_metadata_value(SnapshotConsistentContent, <<"version">>, -1),
                             case Version of
+                                % Selected content has not yet been committed
                                 -1 ->
-                                    % Selected content has not yet been committed
-                                    % So save the request as pending until the transaction is committed
-                                    TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
-                                    lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+                                    TentativeVersion = riak_object:get_metadata_value(SnapshotConsistentContent, <<"tentative_version">>, -1),
+                                    if
+                                        TentativeVersion > Snapshot ->
+                                            {error, conflict};
 
-                                    case ets:lookup(PendingTransactionalGets, TransactionId) of
-                                        [{TransactionId, PendingTransactionalGets}] ->
-                                            ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGets]});
-                                        [] ->
-                                            ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
-                                    end,
+                                        true ->
+                                            TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
+                                            lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+                                            case ets:lookup(PendingTransactionalGets, TransactionId) of
+                                                [{TransactionId, PendingTransactionalGets}] ->
+                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGets]});
+                                                [] ->
+                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
+                                            end,
 
-                                    no_reply;
+                                            no_reply
+                                    end;
+
+                                % Selected content has been committed
                                 _ ->
-                                    % Selected content has been committed
                                     Object1 = riak_object:set_node(Object, node()),
                                     Object2 = riak_object:set_contents(Object1, [SnapshotConsistentContent]),
                                     {ok, Object2}
