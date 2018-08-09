@@ -184,7 +184,7 @@ do_update_object_versions(Nbkeys, Version, TransactionId) ->
     % Update object versions
     case ets:lookup(?LAST_TRANSACTIONS, Version) of
         [{Version, Objects}] ->
-            ets:insert(?LAST_TRANSACTIONS, {Version, [Nbkeys | Objects]});
+            ets:insert(?LAST_TRANSACTIONS, {Version, Nbkeys ++ Objects});
         [] ->
             ets:insert(?LAST_TRANSACTIONS, {Version, Nbkeys})
     end,

@@ -1380,8 +1380,8 @@ handle_transactional_get_request(
                                             TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
                                             lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
                                             case ets:lookup(PendingTransactionalGets, TransactionId) of
-                                                [{TransactionId, PendingTransactionalGets}] ->
-                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGets]});
+                                                [{TransactionId, PendingTransactionalGetRequests}] ->
+                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGetRequests]});
                                                 [] ->
                                                     ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
                                             end,

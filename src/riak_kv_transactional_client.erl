@@ -119,16 +119,14 @@ handle_call(begin_transaction, _From, #state{in_transaction = false} = State) ->
     NewState = State#state{in_transaction = true, id = Id},
     {reply, ok, NewState};
 
-handle_call(begin_transaction, _From, State) ->
+handle_call(begin_transaction, _From, #state{in_transaction = true} = State) ->
     {reply, {error, in_transaction}, State};
-
-handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
-    {reply, {error, not_in_transaction}, State};
 
 handle_call(
   commit_transaction,
   _From,
-  #state{id = Id,
+  #state{in_transaction = true,
+         id = Id,
          snapshot = Snapshot,
          gets = GetsDict,
          puts = PutsDict} = State
@@ -137,6 +135,8 @@ handle_call(
     Puts = dict:fold(fun(_, Value, Acc) -> [Value | Acc] end, [], PutsDict),
     do_commit_transaction(Id, Snapshot, Gets, Puts, State);
 
+handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
+    {reply, {error, not_in_transaction}, State};
 
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
@@ -217,7 +217,8 @@ do_get_local(Node, Bucket, Key, #state{gets = Gets, puts = Puts}) ->
     end.
 
 do_get_remote(Node, Bucket, Key, {_, [ClientNode, _]}, Snapshot, ReadOnly) ->
-    proc_lib:spawn_link(ClientNode, riak_kv_transactional_get_fsm, start_link, [Node, Bucket, Key, Snapshot, ReadOnly, self()]),
+    proc_lib:spawn_link(ClientNode, riak_kv_transactional_get_fsm, start_link,
+                        [Node, Bucket, Key, Snapshot, ReadOnly, self()]),
     receive Response -> Response end.
 
 maybe_set_snapshot({ok, Object}, #state{snapshot = undefined, clock = Clock} = State) ->
@@ -265,14 +266,14 @@ do_commit_transaction(Id, Snapshot, Gets, Puts, #state{client = {_, [Node, _]}} 
     proc_lib:spawn_link(Node, riak_kv_commit_transaction_fsm, start_link,
                         [Id, Snapshot, Gets, Puts, self()]),
 
+    NewState1 = clean_transaction_state(State),
     receive
         {ok, Conflicts, Lsn} ->
             Reply = commit_reply(Conflicts),
-            NewState1 = clean_transaction_state(State),
             NewState = NewState1#state{clock = Lsn},
             {reply, Reply, NewState};
         {error, _Reason} = Reply ->
-            {reply, Reply, State}
+            {reply, Reply, NewState1}
     end.
 
 commit_reply(false) -> ok;

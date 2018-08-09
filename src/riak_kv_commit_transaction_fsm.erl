@@ -123,7 +123,10 @@ respond_to_client(timeout, #state{client = Client, conflicts = Conflicts,
                 true -> {ok, Conflicts, Lsn}
             end,
     erlang:send(Client, Reply),
-    {stop, normal, StateData}.
+    {stop, normal, StateData};
+
+respond_to_client(_, StateData) ->
+    {next_state, respond_to_client, StateData, 0}.
 
 handle_event(_Event, _StateName, StateData) ->
     {stop, badmsg, StateData}.
