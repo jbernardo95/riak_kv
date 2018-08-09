@@ -1394,8 +1394,8 @@ handle_transactional_get_request(
                                             TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
                                             lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
                                             case ets:lookup(PendingTransactionalGets, TransactionId) of
-                                                [{TransactionId, PendingTransactionalGets}] ->
-                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGets]});
+                                                [{TransactionId, PendingTransactionalGetRequests}] ->
+                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGetRequests]});
                                                 [] ->
                                                     ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
                                             end,
@@ -1576,7 +1576,10 @@ handle_commit_transaction_request(
         _ ->
             ForeachFun = fun({_Node, Bucket, Key}) ->
                              Bkey = {Bucket, Key},
-                             TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                             TentativeContents = case ets:lookup(TentativeVersions, Bkey) of
+                                                     [{Bkey, TentativeContents1}] -> TentativeContents1;
+                                                     [] -> []
+                                                 end,
                              FilterFun = fun(Content) ->
                                              TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
                                              TransactionId /= Id
