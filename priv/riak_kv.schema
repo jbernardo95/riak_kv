@@ -812,8 +812,8 @@
 ]}.
 
 %% @doc Specifies the maximum number of transactions kept by the transactions validators
-{mapping, "transactions_manager.validator.maximum_last_transactions", "riak_kv.transactions_validator_maximum_last_transactions", [
+{mapping, "transactions_manager.validator.maximum_object_versions", "riak_kv.transactions_validator_maximum_object_versions", [
     {datatype, integer},
-    {default, 1000},
-    {commented, 1000}
+    {default, 250},
+    {commented, 250}
 ]}.

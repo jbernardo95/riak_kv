@@ -14,7 +14,6 @@
          terminate/2,
          code_change/3]).
 
--define(LAST_TRANSACTIONS, last_transactions).
 -define(OBJECT_VERSIONS, object_versions).
 -define(RUNNING_TRANSACTIONS, running_transactions).
 
@@ -41,7 +40,6 @@ update_object_versions(Id, Objects, Version, TransactionId) ->
 %%%===================================================================
 
 init(Id) ->
-    ets:new(?LAST_TRANSACTIONS, [ordered_set, private, named_table]), 
     ets:new(?OBJECT_VERSIONS, [private, named_table]), 
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
@@ -180,54 +178,6 @@ do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, 
 
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId).
 
-do_update_object_versions(Nbkeys, Version, TransactionId) ->
-    % Update object versions
-    case ets:lookup(?LAST_TRANSACTIONS, Version) of
-        [{Version, Objects}] ->
-            ets:insert(?LAST_TRANSACTIONS, {Version, Nbkeys ++ Objects});
-        [] ->
-            ets:insert(?LAST_TRANSACTIONS, {Version, Nbkeys})
-    end,
-    lists:foreach(
-        fun(Nbkey) ->
-            case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
-                [{Nbkey, garbage_collected}] ->
-                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId}]});
-                [{Nbkey, VTIds}] ->
-                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId} | VTIds]});
-                [] ->
-                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [{Version, TransactionId}]})
-            end
-        end,
-        Nbkeys
-    ),
-
-    % Garbage collect object versions
-    {ok, MaximumLastTransactions} = application:get_env(riak_kv, transactions_validator_maximum_last_transactions),
-    LastTransactionsSize = ets:info(?LAST_TRANSACTIONS, size),
-    if
-        LastTransactionsSize > MaximumLastTransactions ->
-            Lsn = ets:first(?LAST_TRANSACTIONS),
-            ObjectsToTrim = ets:lookup_element(?LAST_TRANSACTIONS, Lsn, 2),
-            ets:delete(?LAST_TRANSACTIONS, Lsn);
-        true ->
-            ObjectsToTrim = []
-    end,
-    lists:foreach(
-        fun(Nbkey) ->
-            case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
-                [{Nbkey, VTIds}] ->
-                    case lists:split(length(VTIds) - 1, VTIds) of
-                        {[], _} ->
-                            ets:insert(?OBJECT_VERSIONS, {Nbkey, garbage_collected});
-                        {NewVTIds, _} ->
-                            ets:insert(?OBJECT_VERSIONS, {Nbkey, NewVTIds})
-                    end
-            end
-        end,
-        ObjectsToTrim 
-    ).
-
 check_conflicts(TransactionId, Gets, Puts, Snapshot, Lsn) ->
     ConflictsGets = do_check_conflicts(TransactionId, Gets, Snapshot, Lsn),
     ConflictsPuts = do_check_conflicts(TransactionId, Puts, Snapshot, Lsn),
@@ -240,9 +190,6 @@ do_check_conflicts(_TransactionId, _Objects, _Snapshot, _Lsn, true) -> true;
 do_check_conflicts(_TransactionId, [], _Snapshot, _Lsn, Conflict) -> Conflict;
 do_check_conflicts(TransactionId, [Nbkey | Rest], Snapshot, Lsn, Conflict1) ->
     Conflict2 = case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
-                    [{Nbkey, garbage_collected}] ->
-                        % Not enough metadata to correctly check if there are conflicts so, just say conservatively there are conflicts
-                        true;
                     [{Nbkey, VTIds}] ->
                         check_object_conflicts(VTIds, TransactionId, Snapshot, Lsn);
                     [] ->
@@ -261,3 +208,27 @@ check_object_conflicts([{Version, _} | _], _TransactionId, Snapshot, _Lsn) when 
 check_object_conflicts([{Version, _} | _], _TransactionId, Snapshot, Lsn) when Version > Snapshot, Version =< Lsn -> true;
 check_object_conflicts([_ | Rest], TransactionId,  Snapshot, Lsn) ->
     check_object_conflicts(Rest, TransactionId, Snapshot, Lsn).
+
+% This function must store object versions in descending order because check_object_conflicts/4 assumes that
+do_update_object_versions(Nbkeys, Version, TransactionId) ->
+    {ok, MaximumObjectVersions} = application:get_env(riak_kv, transactions_validator_maximum_object_versions),
+    lists:foreach(
+        fun(Nbkey) ->
+            VTId = {Version, TransactionId},
+            case ets:lookup(?OBJECT_VERSIONS, Nbkey) of
+                [{Nbkey, VTIds}] ->
+                    VTIdsLength = length(VTIds),
+                    NewVTIds = case VTIdsLength of
+                                   MaximumObjectVersions -> [VTId | droplast(VTIds)];
+                                   _ -> [VTId | VTIds]
+                               end,
+                    ets:insert(?OBJECT_VERSIONS, {Nbkey, NewVTIds});
+                [] ->
+                    ets:insert(?OBJECT_VERSIONS, {Nbkey, [VTId]})
+            end
+        end,
+        Nbkeys
+    ).
+
+droplast([_T])  -> [];
+droplast([H | T]) -> [H | droplast(T)].
