@@ -4,6 +4,7 @@
 
 -export([begin_transaction/1,
          commit_transaction/1,
+         rollback_transaction/1,
          get/4,
          put/5,
          start_link/1]).
@@ -41,6 +42,9 @@ begin_transaction(Client) ->
 
 commit_transaction(Client) ->
     gen_server:call(Client, commit_transaction, infinity).
+
+rollback_transaction(Client) ->
+    gen_server:call(Client, rollback_transaction, infinity).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -138,6 +142,12 @@ handle_call(
 handle_call(commit_transaction, _From, #state{in_transaction = false} = State) ->
     {reply, {error, not_in_transaction}, State};
 
+handle_call(rollback_transaction, _From, #state{in_transaction = true} = State) ->
+    NewState = clean_transaction_state(State),
+    {reply, ok, NewState};
+handle_call(rollback_transaction, _From, #state{in_transaction = false} = State) ->
+    {reply, {error, not_in_transaction}, State};
+
 handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
@@ -219,7 +229,10 @@ do_get_local(Node, Bucket, Key, #state{gets = Gets, puts = Puts}) ->
 do_get_remote(Node, Bucket, Key, {_, [ClientNode, _]}, Snapshot, ReadOnly) ->
     proc_lib:spawn_link(ClientNode, riak_kv_transactional_get_fsm, start_link,
                         [Node, Bucket, Key, Snapshot, ReadOnly, self()]),
-    receive Response -> Response end.
+    receive
+        {error, notfound} -> {error, not_found};
+        Response -> Response
+    end.
 
 maybe_set_snapshot({ok, Object}, #state{snapshot = undefined, clock = Clock} = State) ->
     Version = riak_object:get_metadata_value(Object, <<"version">>, -1),
