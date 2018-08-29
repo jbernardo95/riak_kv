@@ -44,7 +44,7 @@ do_connect_to_vnodes_cluster(Id, VnodeClusterGatewayNode) ->
 
 do_validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
     TransactionsManagerId = get_transactions_manager_id(),
-    riak_kv_transactions_validator:validate(TransactionsManagerId, TransactionId, Snapshot, Gets, Puts, NValidations, Client).
+    riak_kv_transactions_validator:leaf_validate(TransactionsManagerId, TransactionId, Snapshot, Gets, Puts, NValidations, Client).
 
 get_transactions_manager_id() ->
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),

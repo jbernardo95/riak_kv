@@ -797,11 +797,18 @@
     {commented, 5}
 ]}.
 
-%% @doc Specifies the number of nodes of the transaction managers tree
+%% @doc Specifies the number of nodes of the transactions managers tree
 {mapping, "transactions_manager.tree.n_nodes", "riak_kv.transactions_manager_tree_n_nodes", [
     {datatype, integer},
     {default, 3},
     {commented, 3}
+]}.
+
+%% @doc Specifies the size of the batch used  by the transactions manager
+{mapping, "transactions_manager.batch_size", "riak_kv.transactions_manager_batch_size", [
+    {datatype, integer},
+    {default, 10},
+    {commented, 10}
 ]}.
 
 %% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster

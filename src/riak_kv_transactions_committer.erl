@@ -15,6 +15,7 @@
          code_change/3]).
 
 -define(RIAK_RING, riak_ring).
+-define(BATCH, batch).
 
 -record(state, {id}).
 
@@ -40,6 +41,9 @@ commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts,
 
 init(Id) ->
     ets:new(?RIAK_RING, [private, named_table, {keypos, 2}]), 
+    ets:new(?BATCH, [private, named_table]), 
+
+    ets:insert(?BATCH, {size, 0}), 
 
     State = #state{id = Id},
     {ok, State}.
@@ -89,18 +93,24 @@ do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, 
             root_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient)
     end,
 
+    CurrentBatchSize = ets:lookup_element(?BATCH, size, 2),
+    {ok, BatchSize} = application:get_env(riak_kv, transactions_manager_batch_size),
+    case CurrentBatchSize of
+        BatchSize -> send_transactions_batch_up_the_tree();
+        _ -> ok
+    end,
+
     {noreply, State}.
 
 % Leaf committer
 % Transaction only needs one validation 
 % So it can be committed right away 
-leaf_commit(TransactionId, _Snapshot, _Gets, Puts, 1 = _NValidations, Client, Conflicts, Lsn) ->
+leaf_commit(TransactionId, Snapshot, Gets, Puts, 1 = NValidations, Client, Conflicts, Lsn) ->
     send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts),
 
-    Node = riak_object:get_node(hd(Puts)),
-    [Vnode] = ets:lookup(?RIAK_RING, Node),
-    BkeyPuts = lists:map(fun riak_object:bkey/1, Puts),
-    riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn),
+    add_transaction_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
+
+    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
 
     lager:info("Transaction ~p committed~n", [TransactionId]);
 
@@ -117,9 +127,7 @@ leaf_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts
         true -> ok
     end,
 
-    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
-    Root = NNodes - 1,
-    riak_kv_transactions_validator:validate(Root, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn).
+    add_transaction_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn).
 
 % Root committer
 root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Conflicts, Lsn, InformClient) ->
@@ -127,8 +135,26 @@ root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Confli
         InformClient -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
         true -> ok
     end,
+
     send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
+
     lager:info("Transaction ~p committed~n", [TransactionId]).
+
+send_transactions_batch_up_the_tree() ->
+    lager:info("Sending transactions batch up the tree~n", []),
+
+    FoldFun = fun(I, Acc) ->
+                  Transaction = ets:lookup_element(?BATCH, I, 2),
+                  [Transaction | Acc]
+              end,
+    {ok, BatchSize} = application:get_env(riak_kv, transactions_manager_batch_size),
+    TransactionsBatch = lists:foldl(FoldFun, [], lists:reverse(lists:seq(1, BatchSize))),
+
+    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+    Root = NNodes - 1,
+    riak_kv_transactions_validator:batch_validate(Root, TransactionsBatch),
+
+    ets:insert(?BATCH, {size, 0}).
 
 send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts) ->
     Reply = {transaction_commit_result, TransactionId, Conflicts, Lsn},
@@ -150,3 +176,8 @@ send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts) ->
                           BkeyPuts = dict:fetch(Node, NodesPuts),
                           riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn)
                   end, Nodes).
+
+add_transaction_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
+    InsertAt = ets:update_counter(?BATCH, size, 1),
+    Transaction = {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn},
+    ets:insert(?BATCH, {InsertAt, Transaction}).

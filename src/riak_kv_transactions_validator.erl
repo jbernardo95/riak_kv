@@ -3,9 +3,8 @@
 -behaviour(gen_server).
 
 -export([start_link/1,
-         validate/7,
-         validate/9,
-         update_object_versions/4]).
+         leaf_validate/7,
+         batch_validate/2]).
 
 -export([init/1,
          handle_call/3,
@@ -26,14 +25,11 @@
 start_link(Id) ->
     gen_server:start_link({global, {?MODULE, Id}}, ?MODULE, Id, []).
 
-validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
-    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false, -1}).
+leaf_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client) ->
+    gen_server:cast({global, {?MODULE, Id}}, {leaf_validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}).
 
-validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
-    gen_server:cast({global, {?MODULE, Id}}, {validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}).
-
-update_object_versions(Id, Objects, Version, TransactionId) ->
-    gen_server:cast({global, {?MODULE, Id}}, {update_object_versions, Objects, Version, TransactionId}).
+batch_validate(Id, TransactionsBatch) ->
+    gen_server:cast({global, {?MODULE, Id}}, {batch_validate, TransactionsBatch}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -54,12 +50,11 @@ handle_call(Request, _From, State) ->
     lager:error("Unexpected request received at hanlde_call: ~p~n", [Request]),
     {reply, error, State}.
 
-handle_cast({validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}, State) ->
-    do_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, State);
+handle_cast({leaf_validate, TransactionId, Snapshot, Gets, Puts, NValidations, Client}, State) ->
+    do_leaf_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
 
-handle_cast({update_object_versions, Objects, Version, TransactionId}, State) ->
-    do_update_object_versions(Objects, Version, TransactionId),
-    {noreply, State};
+handle_cast({batch_validate, TransactionsBatch}, State) ->
+    do_batch_validate(TransactionsBatch, State);
 
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
@@ -77,26 +72,13 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%% Internal functions
 %%%===================================================================
 
-do_validate(
-  TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn,
-  #state{id = Id} = State
-) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
-
-    {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
-    Root = NNodes - 1,
-    if
-        Id < Root ->
-            leaf_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, State);
-        true ->
-            root_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, State)
-    end.
-
 % Validates transaction as soon as it arrives
-leaf_validate(
+do_leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
   #state{id = Id, next_lsn = NextLsn, step = Step} = State
 ) ->
+    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+
     Lsn = generate_lsn(Snapshot, NextLsn, Step),
 
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
@@ -112,13 +94,8 @@ leaf_validate(
     end,
 
     if
-        (not Conflicts) and (NbkeyPuts /= []) ->
-            do_update_object_versions(NbkeyPuts, Lsn, TransactionId),
-            {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
-            Root = NNodes - 1,
-            riak_kv_transactions_validator:update_object_versions(Root, NbkeyPuts, Lsn, TransactionId);
-        true ->
-            ok
+        (not Conflicts) and (NbkeyPuts /= []) -> do_update_object_versions(NbkeyPuts, Lsn, TransactionId);
+        true -> ok
     end,
 
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
@@ -131,10 +108,29 @@ generate_lsn(Snapshot, Lsn, _Step) when Lsn > Snapshot ->
 generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
     generate_lsn(Snapshot, Lsn + Step, Step).
 
+do_batch_validate(TransactionsBatch, State) ->
+    lager:info("Received batch of transactions to validate~n", []),
+
+    lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}) ->
+                          NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+                          do_update_object_versions(NbkeyPuts, Lsn, TransactionId),
+
+                          case NValidations of
+                              1 ->
+                                  % Transaction validated and commited in one of the leafs, so do nothing
+                                  ok;
+                              _ ->
+                                  % Transaction must be validated again with more information
+                                  root_validate(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, State)
+                          end
+                  end, TransactionsBatch),
+
+    {noreply, State}.
+
 % Validates the transaction once all the info has arrived from its children
 root_validate(
   TransactionId, Snapshot, Gets1, Puts1, NValidations, Client, Conflicts1, Lsn1,
-  #state{id = Id} = State
+  #state{id = Id}
 ) ->
     case ets:lookup(?RUNNING_TRANSACTIONS, TransactionId) of
         [{TransactionId, Gets2, Puts2, Conflicts2, Lsn2, ReceivedValidations1}] ->
@@ -156,9 +152,7 @@ root_validate(
             do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
         _ ->
             ok
-    end,
-
-    {noreply, State}.
+    end.
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false),
