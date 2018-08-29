@@ -82,7 +82,7 @@ do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
     {noreply, State}.
 
 do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient, #state{id = Id} = State) ->
-    lager:info("Received transaction ~p to commit~n", [TransactionId]),
+    %lager:info("Received transaction ~p to commit~n", [TransactionId]),
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Root = NNodes - 1,
@@ -110,9 +110,9 @@ leaf_commit(TransactionId, Snapshot, Gets, Puts, 1 = NValidations, Client, Confl
 
     add_transaction_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
 
-    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
+    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts);
 
-    lager:info("Transaction ~p committed~n", [TransactionId]);
+    %lager:info("Transaction ~p committed~n", [TransactionId]);
 
 % Leaf committer
 % Transaction needs more than one validation
@@ -120,7 +120,7 @@ leaf_commit(TransactionId, Snapshot, Gets, Puts, 1 = NValidations, Client, Confl
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
 leaf_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
-    lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
+    %lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
 
     if
         Conflicts -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
@@ -136,12 +136,12 @@ root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Confli
         true -> ok
     end,
 
-    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
+    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts).
 
-    lager:info("Transaction ~p committed~n", [TransactionId]).
+    %lager:info("Transaction ~p committed~n", [TransactionId]).
 
 send_transactions_batch_up_the_tree() ->
-    lager:info("Sending transactions batch up the tree~n", []),
+    %lager:info("Sending transactions batch up the tree~n", []),
 
     FoldFun = fun(I, Acc) ->
                   Transaction = ets:lookup_element(?BATCH, I, 2),
