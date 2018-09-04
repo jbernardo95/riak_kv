@@ -804,8 +804,8 @@
     {commented, 3}
 ]}.
 
-%% @doc Specifies the size of the batch used  by the transactions manager
-{mapping, "transactions_manager.batch_size", "riak_kv.transactions_manager_batch_size", [
+%% @doc Specifies the time window used to batch messages by the transactions manager
+{mapping, "transactions_manager.batch_window", "riak_kv.transactions_manager_batch_window", [
     {datatype, integer},
     {default, 10},
     {commented, 10}
