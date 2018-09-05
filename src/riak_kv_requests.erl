@@ -22,9 +22,10 @@
 -module(riak_kv_requests).
 
 %% API
--export([new_commit_transaction_request/5,
+-export([new_transactional_get_request/3,
+         new_commit_transaction_request/5,
          new_transaction_validation_request/4,
-         new_transactional_get_request/3,
+         new_transaction_validation_batch_request/1,
          new_put_request/5,
          new_get_request/2,
          new_w1c_put_request/3,
@@ -59,12 +60,14 @@
          get_conflicts/1,
          get_lsn/1,
          get_read_only/1,
+         get_transaction_validation_batch/1,
          remove_option/2,
          request_type/1]).
 
--export_type([commit_transaction_request/0,
+-export_type([transactional_get_request/0,
+              commit_transaction_request/0,
               transaction_validation_request/0,
-              transactional_get_request/0,
+              transaction_validation_batch_request/0,
               put_request/0,
               get_request/0,
               w1c_put_request/0,
@@ -92,6 +95,12 @@
 -type coverage_filter() :: riak_kv_coverage_filter:filter().
 -type query() :: riak_index:query_def().
 
+-record(riak_kv_transactional_get_req_v1, {
+    bkey :: bucket_key(),
+    snapshot :: non_neg_integer(),
+    read_only :: boolean()
+}).
+
 -record(riak_kv_commit_transaction_req_v1, {
     id :: non_neg_integer(),
     snapshot :: non_neg_integer(),
@@ -107,10 +116,8 @@
     lsn :: non_neg_integer()
 }).
 
--record(riak_kv_transactional_get_req_v1, {
-    bkey :: bucket_key(),
-    snapshot :: non_neg_integer(),
-    read_only :: boolean()
+-record(riak_kv_transaction_validation_batch_req_v1, {
+    transaction_validation_batch :: [term()]
 }).
 
 -record(riak_kv_put_req_v1, {
@@ -183,9 +190,10 @@
 -record(riak_kv_vclock_req_v1, {bkeys = [] :: [bucket_key()]}).
 
 
+-opaque transactional_get_request() :: #riak_kv_transactional_get_req_v1{}.
 -opaque commit_transaction_request() :: #riak_kv_commit_transaction_req_v1{}.
 -opaque transaction_validation_request() :: #riak_kv_transaction_validation_req_v1{}.
--opaque transactional_get_request() :: #riak_kv_transactional_get_req_v1{}.
+-opaque transaction_validation_batch_request() :: #riak_kv_transaction_validation_batch_req_v1{}.
 -opaque put_request() :: #riak_kv_put_req_v1{}.
 -opaque get_request() :: #riak_kv_get_req_v1{}.
 -opaque w1c_put_request() :: #riak_kv_w1c_put_req_v1{}.
@@ -199,9 +207,10 @@
 -opaque vclock_request() :: #riak_kv_vclock_req_v1{}.
 
 
--type request() :: commit_transaction_request()
+-type request() :: transactional_get_request()
+                 | commit_transaction_request()
                  | transaction_validation_request()
-                 | transactional_get_request()
+                 | transaction_validation_batch_request()
                  | put_request()
                  | get_request()
                  | w1c_put_request()
@@ -214,9 +223,10 @@
                  | map_request()
                  | vclock_request().
 
--type request_type() :: kv_commit_transaction_request
+-type request_type() :: kv_transactional_get_request
+                      | kv_commit_transaction_request
                       | kv_transaction_validation_request
-                      | kv_transactional_get_request
+                      | kv_transaction_validation_batch_request
                       | kv_put_request
                       | kv_get_request
                       | kv_w1c_put_request
@@ -231,23 +241,32 @@
                       | unknown.
 
 -spec request_type(request()) -> request_type().
-request_type(#riak_kv_commit_transaction_req_v1{})     -> kv_commit_transaction_request;
-request_type(#riak_kv_transaction_validation_req_v1{}) -> kv_transaction_validation_request;
-request_type(#riak_kv_transactional_get_req_v1{})      -> kv_transactional_get_request;
-request_type(#riak_kv_put_req_v1{})                    -> kv_put_request;
-request_type(#riak_kv_get_req_v1{})                    -> kv_get_request;
-request_type(#riak_kv_w1c_put_req_v1{})                -> kv_w1c_put_request;
-request_type(#riak_kv_listkeys_req_v3{})               -> kv_listkeys_request;
-request_type(#riak_kv_listkeys_req_v4{})               -> kv_listkeys_request;
-request_type(#riak_kv_list_group_req_v1{})             -> kv_list_group_request;
-request_type(#riak_kv_listbuckets_req_v1{})            -> kv_listbuckets_request;
-request_type(#riak_kv_index_req_v1{})                  -> kv_index_request;
-request_type(#riak_kv_index_req_v2{})                  -> kv_index_request;
-request_type(#riak_kv_vnode_status_req_v1{})           -> kv_vnode_status_request;
-request_type(#riak_kv_delete_req_v1{})                 -> kv_delete_request;
-request_type(#riak_kv_map_req_v1{})                    -> kv_map_request;
-request_type(#riak_kv_vclock_req_v1{})                 -> kv_vclock_request;
-request_type(_)                                        -> unknown.
+request_type(#riak_kv_transactional_get_req_v1{})            -> kv_transactional_get_request;
+request_type(#riak_kv_commit_transaction_req_v1{})           -> kv_commit_transaction_request;
+request_type(#riak_kv_transaction_validation_req_v1{})       -> kv_transaction_validation_request;
+request_type(#riak_kv_transaction_validation_batch_req_v1{}) -> kv_transaction_validation_batch_request;
+request_type(#riak_kv_put_req_v1{})                          -> kv_put_request;
+request_type(#riak_kv_get_req_v1{})                          -> kv_get_request;
+request_type(#riak_kv_w1c_put_req_v1{})                      -> kv_w1c_put_request;
+request_type(#riak_kv_listkeys_req_v3{})                     -> kv_listkeys_request;
+request_type(#riak_kv_listkeys_req_v4{})                     -> kv_listkeys_request;
+request_type(#riak_kv_list_group_req_v1{})                   -> kv_list_group_request;
+request_type(#riak_kv_listbuckets_req_v1{})                  -> kv_listbuckets_request;
+request_type(#riak_kv_index_req_v1{})                        -> kv_index_request;
+request_type(#riak_kv_index_req_v2{})                        -> kv_index_request;
+request_type(#riak_kv_vnode_status_req_v1{})                 -> kv_vnode_status_request;
+request_type(#riak_kv_delete_req_v1{})                       -> kv_delete_request;
+request_type(#riak_kv_map_req_v1{})                          -> kv_map_request;
+request_type(#riak_kv_vclock_req_v1{})                       -> kv_vclock_request;
+request_type(_)                                              -> unknown.
+
+-spec new_transactional_get_request(bucket_key(),
+                                    non_neg_integer(),
+                                    boolean()) -> transactional_get_request().
+new_transactional_get_request(BKey, Snapshot, ReadOnly) ->
+    #riak_kv_transactional_get_req_v1{bkey = BKey,
+                                      snapshot = Snapshot,
+                                      read_only = ReadOnly}.
 
 -spec new_commit_transaction_request(non_neg_integer(),
                                      non_neg_integer(),
@@ -270,13 +289,9 @@ new_transaction_validation_request(Id, Puts, Conflicts, Lsn) ->
                                            conflicts = Conflicts,
                                            lsn = Lsn}.
 
--spec new_transactional_get_request(bucket_key(),
-                                    non_neg_integer(),
-                                    boolean()) -> transactional_get_request().
-new_transactional_get_request(BKey, Snapshot, ReadOnly) ->
-    #riak_kv_transactional_get_req_v1{bkey = BKey,
-                                      snapshot = Snapshot,
-                                      read_only = ReadOnly}.
+-spec new_transaction_validation_batch_request([term()]) -> transaction_validation_batch_request().
+new_transaction_validation_batch_request(TransactionValidationBatch) ->
+    #riak_kv_transaction_validation_batch_req_v1{transaction_validation_batch = TransactionValidationBatch}.
 
 -spec new_put_request(bucket_key(),
                       object(),
@@ -447,10 +462,10 @@ get_id(#riak_kv_commit_transaction_req_v1{id = Id}) ->
 get_id(#riak_kv_transaction_validation_req_v1{id = Id}) ->
     Id.
 
-get_snapshot(#riak_kv_commit_transaction_req_v1{snapshot = Snapshot}) ->
+get_snapshot(#riak_kv_transactional_get_req_v1{snapshot = Snapshot}) ->
     Snapshot;
 
-get_snapshot(#riak_kv_transactional_get_req_v1{snapshot = Snapshot}) ->
+get_snapshot(#riak_kv_commit_transaction_req_v1{snapshot = Snapshot}) ->
     Snapshot.
 
 get_gets(#riak_kv_commit_transaction_req_v1{gets = Gets}) ->
@@ -473,6 +488,9 @@ get_lsn(#riak_kv_transaction_validation_req_v1{lsn = Lsn}) ->
 
 get_read_only(#riak_kv_transactional_get_req_v1{read_only = ReadOnly}) ->
     ReadOnly.
+
+get_transaction_validation_batch(#riak_kv_transaction_validation_batch_req_v1{transaction_validation_batch = TransactionValidationBatch}) ->
+    TransactionValidationBatch.
 
 remove_option(#riak_kv_put_req_v1{options = Options}=Req, Option) ->
     NewOptions = proplists:delete(Option, Options),

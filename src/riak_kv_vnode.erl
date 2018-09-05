@@ -31,6 +31,7 @@
          transactional_get/4,
          commit_transaction/6,
          transaction_validation/5,
+         transaction_validation_batch/2,
          get/3,
          get/4,
          del/3,
@@ -259,6 +260,10 @@ commit_transaction(Preflist, Id, Snapshot, Gets, Puts, NValidations) ->
 
 transaction_validation(Preflist, Id, Puts, Conflicts, Lsn) ->
     Request = riak_kv_requests:new_transaction_validation_request(Id, Puts, Conflicts, Lsn),
+    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
+
+transaction_validation_batch(Preflist, TransactionValidationBatch) ->
+    Request = riak_kv_requests:new_transaction_validation_batch_request(TransactionValidationBatch),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 get(PreflistOrVnodePid, BKey, ReqId) ->
@@ -554,6 +559,8 @@ handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
 handle_overload_request(kv_transaction_validation_request, _Req, Sender, Idx) ->
     erlang:send(Sender, {error, overload, Idx});
+handle_overload_request(kv_transaction_validation_batch_request, _Req, Sender, Idx) ->
+    erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
 handle_overload_request(kv_get_request, Req, Sender, Idx) ->
@@ -800,6 +807,9 @@ handle_request(kv_commit_transaction_request, Req, Sender, State) ->
     {noreply, NewState};
 handle_request(kv_transaction_validation_request, Req, Sender, State) ->
     NewState = handle_transaction_validation_request(Req, Sender, State),
+    {noreply, NewState};
+handle_request(kv_transaction_validation_batch_request, Req, Sender, State) ->
+    NewState = handle_transaction_validation_batch_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
@@ -1504,13 +1514,7 @@ handle_commit_transaction_request(
 
     State.
 
-handle_transaction_validation_request(
-  Req,
-  _Sender,
-  #state{idx = Idx,
-         pending_transactional_gets = PendingTransactionalGets,
-         tentative_versions = TentativeVersions} = State
-) ->
+handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
@@ -1518,6 +1522,25 @@ handle_transaction_validation_request(
     Conflicts = riak_kv_requests:get_conflicts(Req),
     Lsn = riak_kv_requests:get_lsn(Req),
 
+    do_handle_transaction_validation_request(Id, Puts, Conflicts, Lsn, State).
+
+handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling transaction validation batch request at vnode ~p~n", [Idx]),
+
+    TransactionsValidationBatch = riak_kv_requests:get_transaction_validation_batch(Req),
+
+    lists:foldl(fun({Id, Puts, Conflicts, Lsn}, Acc) ->
+                        do_handle_transaction_validation_request(Id, Puts, Conflicts, Lsn, Acc)
+                end, State, TransactionsValidationBatch).
+
+do_handle_transaction_validation_request(
+  Id,
+  Puts,
+  Conflicts,
+  Lsn, 
+  #state{pending_transactional_gets = PendingTransactionalGets,
+         tentative_versions = TentativeVersions} = State
+) ->
     if
         % Abort by deleting all tentative versions from memory
         Conflicts ->

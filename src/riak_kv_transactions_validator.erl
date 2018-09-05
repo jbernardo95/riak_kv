@@ -118,6 +118,7 @@ do_batch_validate(TransactionsBatch, State) ->
                           case NValidations of
                               1 ->
                                   % Transaction validated and commited in one of the leafs, so do nothing
+                                  lager:info("Transaction already committed~n", []),
                                   ok;
                               _ ->
                                   % Transaction must be validated again with more information
@@ -155,6 +156,7 @@ root_validate(
     end.
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
+    lager:info("Conflicts found in lower validator~n", []),
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false),
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->

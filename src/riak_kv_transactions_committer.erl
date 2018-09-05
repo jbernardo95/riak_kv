@@ -43,10 +43,7 @@ init(Id) ->
     ets:new(?RIAK_RING, [private, named_table, {keypos, 2}]), 
     ets:new(?BATCH, [private, named_table]), 
 
-    ets:insert(?BATCH, {size, 0}), 
-
-    {ok, BatchWindow} = application:get_env(riak_kv, transactions_manager_batch_window),
-    Timer = erlang:send_after(BatchWindow, self(), send_batch),
+    Timer = erlang:send(self(), send_batch),
 
     State = #state{id = Id, timer = Timer},
     {ok, State}.
@@ -87,26 +84,70 @@ do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, State) ->
     ets:insert(?RIAK_RING, Vnodes),
     {noreply, State}.
 
-do_send_batch(State) ->
-    FoldFun = fun(I, Acc) ->
-                  Transaction = ets:lookup_element(?BATCH, I, 2),
-                  [Transaction | Acc]
-              end,
-    Size = ets:lookup_element(?BATCH, size, 2),
-    lager:info("Sending batch with size ~p up the tree~n", [Size]),
-    TransactionsBatch = lists:foldl(FoldFun, [], lists:reverse(lists:seq(1, Size))),
-
+do_send_batch(#state{id = Id} = State) ->
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Root = NNodes - 1,
-    riak_kv_transactions_validator:batch_validate(Root, TransactionsBatch),
-
-    ets:insert(?BATCH, {size, 0}),
+    if
+        Id < Root -> leaf_send_batch();
+        true -> root_send_batch()
+    end,
     
     {ok, BatchWindow} = application:get_env(riak_kv, transactions_manager_batch_window),
     Timer = erlang:send_after(BatchWindow, self(), send_batch),
 
     NewState = State#state{timer = Timer},
     {noreply, NewState}.
+
+leaf_send_batch() ->
+    FoldFun = fun(I, Acc) ->
+                  Transaction = ets:lookup_element(?BATCH, I, 2),
+                  [Transaction | Acc]
+              end,
+    Size = batch_size(),
+    TransactionsBatch = lists:foldl(FoldFun, [], lists:reverse(lists:seq(1, Size))),
+
+    case Size of
+        0 -> ok;
+        _ ->
+            {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
+            Root = NNodes - 1,
+            lager:info("Sending batch with size ~p up the tree~n", [Size]),
+            riak_kv_transactions_validator:batch_validate(Root, TransactionsBatch)
+    end,
+
+    ets:insert(?BATCH, {size, 0}).
+
+batch_size() ->
+    case ets:lookup(?BATCH, size) of
+        [{size, Size}] -> Size;
+        [] -> 0
+    end.
+
+root_send_batch() ->
+    Vnodes = ets:match(?RIAK_RING, '$1'),
+    lists:foreach(fun([{_, Node} = Vnode]) ->
+                          FoldFun = fun(I, Acc) ->
+                                            TransactionValidation = ets:lookup_element(?BATCH, {Node, I}, 2),
+                                            [TransactionValidation | Acc]
+                                    end,
+                          Size = batch_size(Node),
+                          TransactionsValidationBatch = lists:foldl(FoldFun, [], lists:reverse(lists:seq(1, Size))),
+
+                          case Size of
+                              0 -> ok;
+                              _ ->
+                                  lager:info("Sending batch with size ~p to vnode ~p~n", [Size, Vnode]),
+                                  riak_kv_vnode:transaction_validation_batch(Vnode, TransactionsValidationBatch)
+                          end,
+
+                          ets:insert(?BATCH, {{Node, size}, 0})
+                  end, Vnodes).
+
+batch_size(Node) ->
+    case ets:lookup(?BATCH, {Node, size}) of
+        [{{Node, size}, Size}] -> Size;
+        [] -> 0
+    end.
 
 do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient, #state{id = Id} = State) ->
     lager:info("Received transaction ~p to commit~n", [TransactionId]),
@@ -156,7 +197,7 @@ root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Confli
         true -> ok
     end,
 
-    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
+    root_add_to_batch(TransactionId, Lsn, Puts, Conflicts),
 
     lager:info("Transaction ~p committed~n", [TransactionId]).
 
@@ -165,6 +206,32 @@ send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts) ->
     riak_core_vnode:reply(Client, Reply).
 
 send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts) ->
+    NodesPuts = group_puts_per_node(Puts),
+    Nodes = dict:fetch_keys(NodesPuts),
+    lists:foreach(fun(Node) ->
+                          [Vnode] = ets:lookup(?RIAK_RING, Node),
+                          BkeyPuts = dict:fetch(Node, NodesPuts),
+
+                          riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn)
+                  end, Nodes).
+
+leaf_add_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
+    InsertAt = ets:update_counter(?BATCH, size, 1),
+    Transaction = {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn},
+    ets:insert(?BATCH, {InsertAt, Transaction}).
+
+root_add_to_batch(TransactionId, Lsn, Puts, Conflicts) ->
+    NodesPuts = group_puts_per_node(Puts),
+    Nodes = dict:fetch_keys(NodesPuts),
+    lists:foreach(fun(Node) ->
+                          InsertAt = ets:update_counter(?BATCH, {Node, size}, 1),
+                          BkeyPuts = dict:fetch(Node, NodesPuts),
+                          TransactionValidation = {TransactionId, BkeyPuts, Conflicts, Lsn},
+
+                          ets:insert(?BATCH, {{Node, InsertAt}, TransactionValidation})
+                  end, Nodes).
+
+group_puts_per_node(Puts) ->
     FoldFun = fun(Object, NodesPuts1) ->
                       Node1 = riak_object:get_node(Object),
                       Bkey = riak_object:bkey(Object),
@@ -173,15 +240,4 @@ send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts) ->
                           error -> dict:store(Node1, [Bkey], NodesPuts1)
                       end
               end,
-    NodesPuts = lists:foldl(FoldFun, dict:new(), Puts),
-    Nodes = dict:fetch_keys(NodesPuts),
-    lists:foreach(fun(Node) ->
-                          [Vnode] = ets:lookup(?RIAK_RING, Node),
-                          BkeyPuts = dict:fetch(Node, NodesPuts),
-                          riak_kv_vnode:transaction_validation(Vnode, TransactionId, BkeyPuts, Conflicts, Lsn)
-                  end, Nodes).
-
-leaf_add_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
-    InsertAt = ets:update_counter(?BATCH, size, 1),
-    Transaction = {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn},
-    ets:insert(?BATCH, {InsertAt, Transaction}).
+    lists:foldl(FoldFun, dict:new(), Puts).
