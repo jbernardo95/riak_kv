@@ -126,7 +126,7 @@ leaf_send_batch() ->
         _ ->
             {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
             Root = NNodes - 1,
-            lager:info("Sending batch with size ~p up the tree~n", [Size]),
+            %lager:info("Sending batch with size ~p up the tree~n", [Size]),
             riak_kv_transactions_validator:batch_validate(Root, TransactionsBatch)
     end,
 
@@ -151,7 +151,7 @@ root_send_batch() ->
                           case Size of
                               0 -> ok;
                               _ ->
-                                  lager:info("Sending batch with size ~p to vnode ~p~n", [Size, Vnode]),
+                                  %lager:info("Sending batch with size ~p to vnode ~p~n", [Size, Vnode]),
                                   riak_kv_vnode:transaction_validation_batch(Vnode, TransactionsValidationBatch)
                           end,
 
@@ -179,7 +179,7 @@ do_commit(
   #state{id = Id,
          timer = Timer} = State
 ) ->
-    lager:info("Received transaction ~p to commit~n", [TransactionId]),
+    %lager:info("Received transaction ~p to commit~n", [TransactionId]),
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Root = NNodes - 1,
@@ -208,9 +208,9 @@ leaf_commit(TransactionId, Snapshot, Gets, Puts, 1 = NValidations, Client, Confl
 
     leaf_add_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
 
-    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts),
+    send_validation_result_to_vnodes(TransactionId, Lsn, Puts, Conflicts);
 
-    lager:info("Transaction ~p committed~n", [TransactionId]);
+    %lager:info("Transaction ~p committed~n", [TransactionId]);
 
 % Leaf committer
 % Transaction needs more than one validation
@@ -218,7 +218,7 @@ leaf_commit(TransactionId, Snapshot, Gets, Puts, 1 = NValidations, Client, Confl
 % For now the transaction is sent to the root committer automatically
 % In the future the routing code should be changed so that the transaction is sent to the correct committer
 leaf_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn) ->
-    lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
+    %lager:info("Not enough information to commit transaction ~p, sending transaction to be validated up the tree~n", [TransactionId]),
 
     if
         Conflicts -> send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts);
@@ -234,9 +234,9 @@ root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Confli
         true -> ok
     end,
 
-    root_add_to_batch(TransactionId, Lsn, Puts, Conflicts),
+    root_add_to_batch(TransactionId, Lsn, Puts, Conflicts).
 
-    lager:info("Transaction ~p committed~n", [TransactionId]).
+    %lager:info("Transaction ~p committed~n", [TransactionId]).
 
 send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts) ->
     ClientTransactionValidationMessages = ets:lookup_element(?STATS, client_transaction_validation_messages, 2),
