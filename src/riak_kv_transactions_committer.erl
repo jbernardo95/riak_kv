@@ -43,9 +43,9 @@ init(Id) ->
     ets:new(?RIAK_RING, [private, named_table, {keypos, 2}]), 
     ets:new(?BATCH, [private, named_table]), 
 
-    Timer = erlang:send(self(), send_batch),
+    erlang:send(self(), send_batch),
 
-    State = #state{id = Id, timer = Timer},
+    State = #state{id = Id},
     {ok, State}.
 
 handle_call(Request, _From, State) ->
@@ -92,8 +92,8 @@ do_send_batch(#state{id = Id} = State) ->
         true -> root_send_batch()
     end,
     
-    {ok, BatchWindow} = application:get_env(riak_kv, transactions_manager_batch_window),
-    Timer = erlang:send_after(BatchWindow, self(), send_batch),
+    {ok, BatchTimeout} = application:get_env(riak_kv, transactions_manager_batch_timeout),
+    Timer = erlang:send_after(BatchTimeout, self(), send_batch),
 
     NewState = State#state{timer = Timer},
     {noreply, NewState}.
@@ -141,7 +141,9 @@ root_send_batch() ->
                           end,
 
                           ets:insert(?BATCH, {{Node, size}, 0})
-                  end, Vnodes).
+                  end, Vnodes),
+
+    ets:insert(?BATCH, {size, 0}).
 
 batch_size(Node) ->
     case ets:lookup(?BATCH, {Node, size}) of
@@ -149,7 +151,19 @@ batch_size(Node) ->
         [] -> 0
     end.
 
-do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient, #state{id = Id} = State) ->
+do_commit(
+  TransactionId,
+  Snapshot,
+  Gets,
+  Puts,
+  NValidations,
+  Client,
+  Conflicts,
+  Lsn,
+  InformClient,
+  #state{id = Id,
+         timer = Timer} = State
+) ->
     lager:info("Received transaction ~p to commit~n", [TransactionId]),
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
@@ -161,7 +175,15 @@ do_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, 
             root_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, InformClient)
     end,
 
-    {noreply, State}.
+    CurrentBatchSize = ets:lookup_element(?BATCH, size, 2),
+    {ok, BatchSize} = application:get_env(riak_kv, transactions_manager_batch_size),
+    case CurrentBatchSize of
+        BatchSize ->
+            erlang:cancel_timer(Timer),
+            do_send_batch(State);
+        _ ->
+            {noreply, State}
+    end.
 
 % Leaf committer
 % Transaction only needs one validation 
@@ -221,6 +243,8 @@ leaf_add_to_batch(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Con
     ets:insert(?BATCH, {InsertAt, Transaction}).
 
 root_add_to_batch(TransactionId, Lsn, Puts, Conflicts) ->
+    ets:update_counter(?BATCH, size, 1),
+
     NodesPuts = group_puts_per_node(Puts),
     Nodes = dict:fetch_keys(NodesPuts),
     lists:foreach(fun(Node) ->

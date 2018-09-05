@@ -804,11 +804,18 @@
     {commented, 3}
 ]}.
 
-%% @doc Specifies the time window used to batch messages by the transactions manager
-{mapping, "transactions_manager.batch_window", "riak_kv.transactions_manager_batch_window", [
+%% @doc Specifies the size of the batch used by the transactions manager
+{mapping, "transactions_manager.batch_size", "riak_kv.transactions_manager_batch_size", [
     {datatype, integer},
-    {default, 10},
-    {commented, 10}
+    {default, 50},
+    {commented, 50}
+]}.
+
+%% @doc Specifies the timeout used by the tx manager to ship a batch if it does not reach the transactions_manager.batch_size
+{mapping, "transactions_manager.batch_timeout", "riak_kv.transactions_manager_batch_timeout", [
+    {datatype, integer},
+    {default, 100},
+    {commented, 100}
 ]}.
 
 %% @doc Specifies the Erlang node that the transactions managers should use to get information about the vnode cluster
