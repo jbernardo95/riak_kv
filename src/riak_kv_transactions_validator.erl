@@ -77,20 +77,20 @@ do_leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
   #state{id = Id, next_lsn = NextLsn, step = Step} = State
 ) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+    %lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
     Lsn = generate_lsn(Snapshot, NextLsn, Step),
 
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
-    lager:info("Leaf validation in progress...~n", []),
+    %lager:info("Leaf validation in progress...~n", []),
     if
         BlindWrite ->
-            Conflicts = false,
-            lager:info("Blind write, conflicts false~n", []);
+            Conflicts = false;
+            %lager:info("Blind write, conflicts false~n", []);
         true ->
-            Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
+            Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn)
+            %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
     end,
 
     if
@@ -109,7 +109,7 @@ generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
     generate_lsn(Snapshot, Lsn + Step, Step).
 
 do_batch_validate(TransactionsBatch, State) ->
-    lager:info("Received batch of transactions to validate~n", []),
+    %lager:info("Received batch of transactions to validate~n", []),
 
     lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}) ->
                           NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
@@ -118,7 +118,7 @@ do_batch_validate(TransactionsBatch, State) ->
                           case NValidations of
                               1 ->
                                   % Transaction validated and commited in one of the leafs, so do nothing
-                                  lager:info("Transaction already committed~n", []),
+                                  %lager:info("Transaction already committed~n", []),
                                   ok;
                               _ ->
                                   % Transaction must be validated again with more information
@@ -156,14 +156,14 @@ root_validate(
     end.
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
-    lager:info("Conflicts found in lower validator~n", []),
+    %lager:info("Conflicts found in lower validator~n", []),
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false),
     ets:delete(?RUNNING_TRANSACTIONS, TransactionId);
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
-    lager:info("Root validation in progress...~n", []),
+    %lager:info("Root validation in progress...~n", []),
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     Conflicts = check_conflicts(TransactionId, Gets, NbkeyPuts, Snapshot, Lsn),
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true),
 
