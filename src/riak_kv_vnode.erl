@@ -147,7 +147,8 @@
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
                 pending_transactional_gets :: ets:tab(),
-                tentative_versions :: ets:tab()}).
+                tentative_versions :: ets:tab(),
+                stats :: ets:tab()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -497,6 +498,12 @@ init([Index]) ->
     PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
     TentativeVersions = ets:new(tentative_versions, []), 
 
+    Stats = ets:new(stats, []), 
+    ets:insert(Stats, {received_commit_transaction_request_messages, 0}), 
+    ets:insert(Stats, {received_transaction_validation_batch_messages, 0}), 
+    ets:insert(Stats, {received_transaction_validation_messages, 0}), 
+    erlang:send_after(60000, self(), print_stats),
+
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
@@ -524,7 +531,8 @@ init([Index]) ->
                            md_cache_size = MDCacheSize,
                            update_hook = update_hook(),
                            pending_transactional_gets = PendingTransactionalGets,
-                           tentative_versions = TentativeVersions},
+                           tentative_versions = TentativeVersions,
+                           stats = Stats},
 
             try_set_vnode_lock_limit(Index),
 
@@ -1199,6 +1207,20 @@ terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) 
     riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
 
+handle_info(print_stats, #state{stats = Stats} = State) ->
+    ReceivedCommitTransactionRequestMessages = ets:lookup_element(Stats, received_commit_transaction_request_messages, 2),
+    ReceivedTransactionValidationBatchMessages = ets:lookup_element(Stats, received_transaction_validation_batch_messages, 2),
+    ReceivedTransactionValidationMessages = ets:lookup_element(Stats, received_transaction_validation_messages, 2),
+
+    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
+    lager:info("received_commit_transaction_request_messages = ~p~n", [ReceivedCommitTransactionRequestMessages]),
+    lager:info("received_transaction_validation_batch_messages = ~p~n", [ReceivedTransactionValidationBatchMessages]),
+    lager:info("received_transaction_validation_messages = ~p~n", [ReceivedTransactionValidationMessages]),
+
+    erlang:send_after(60000, self(), print_stats),
+
+    {ok, State};
+            
 handle_info({{w1c_async_put, From, Type, Bucket, Key, EncodedVal, StartTS} = _Context, Reply},
             State=#state{idx=Idx, update_hook=UpdateHook}) ->
     update_hashtree(Bucket, Key, EncodedVal, State),
@@ -1488,9 +1510,13 @@ handle_commit_transaction_request(
   Req,
   Sender,
   #state{idx = Idx,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = TentativeVersions,
+         stats = Stats} = State
 ) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    ReceivedCommitTransactionRequestMessages = ets:lookup_element(Stats, received_commit_transaction_request_messages, 2),
+    ets:insert(Stats, {received_commit_transaction_request_messages, ReceivedCommitTransactionRequestMessages + 1}),
 
     % Save puts as tentative 
     Puts = riak_kv_requests:get_puts(Req),
@@ -1514,8 +1540,11 @@ handle_commit_transaction_request(
 
     State.
 
-handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
+handle_transaction_validation_request(Req, _Sender, #state{idx = Idx, stats = Stats} = State) ->
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
+
+    ReceivedTransactionValidationMessages = ets:lookup_element(Stats, received_transaction_validation_messages, 2),
+    ets:insert(Stats, {received_transaction_validation_messages, ReceivedTransactionValidationMessages + 1}),
     
     Id = riak_kv_requests:get_id(Req),
     Puts = riak_kv_requests:get_puts(Req),
@@ -1524,8 +1553,11 @@ handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) -
 
     do_handle_transaction_validation_request(Id, Puts, Conflicts, Lsn, State).
 
-handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx} = State) ->
+handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx, stats = Stats} = State) ->
     lager:info("Handling transaction validation batch request at vnode ~p~n", [Idx]),
+
+    ReceivedTransactionValidationBatchMessages = ets:lookup_element(Stats, received_transaction_validation_batch_messages, 2),
+    ets:insert(Stats, {received_transaction_validation_batch_messages, ReceivedTransactionValidationBatchMessages + 1}),
 
     TransactionsValidationBatch = riak_kv_requests:get_transaction_validation_batch(Req),
 

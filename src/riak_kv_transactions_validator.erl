@@ -15,6 +15,7 @@
 
 -define(OBJECT_VERSIONS, object_versions).
 -define(RUNNING_TRANSACTIONS, running_transactions).
+-define(STATS, stats_transactions_validator).
 
 -record(state, {id, next_lsn, step}).
 
@@ -39,6 +40,10 @@ init(Id) ->
     ets:new(?OBJECT_VERSIONS, [private, named_table]), 
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
+    ets:new(?STATS, [private, named_table]), 
+    ets:insert(?STATS, {received_batch_validate_messages, 0}), 
+    erlang:send_after(60000, self(), print_stats),
+
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
     Step = case (NNodes - 1) of 0 -> 1; S -> S end,
     State = #state{id = Id,
@@ -59,6 +64,16 @@ handle_cast({batch_validate, TransactionsBatch}, State) ->
 handle_cast(Request, State) ->
     lager:error("Unexpected request received at hanlde_cast: ~p~n", [Request]),
     {noreply, State}.
+
+handle_info(print_stats, State) ->
+    ReceivedBatchValidateMessages = ets:lookup_element(?STATS, received_batch_validate_messages, 2),
+
+    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
+    lager:info("### received_batch_validate_messages = ~p~n", [ReceivedBatchValidateMessages]),
+
+    erlang:send_after(60000, self(), print_stats),
+
+    {noreply, State};
 
 handle_info(Info, State) ->
     lager:error("Unexpected info received at handle_info: ~p~n", [Info]),
@@ -110,6 +125,9 @@ generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
 
 do_batch_validate(TransactionsBatch, State) ->
     lager:info("Received batch of transactions to validate~n", []),
+
+    ReceivedBatchValidateMessages = ets:lookup_element(?STATS, received_batch_validate_messages, 2),
+    ets:insert(?STATS, {received_batch_validate_messages, ReceivedBatchValidateMessages + 1}),
 
     lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}) ->
                           NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
