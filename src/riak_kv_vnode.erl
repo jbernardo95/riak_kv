@@ -148,7 +148,8 @@
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
                 two_phase_commit_server :: pid(),
                 pending_transactional_gets :: ets:tab(),
-                tentative_versions :: ets:tab()}).
+                tentative_versions :: ets:tab(),
+                stats :: ets:tab()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -499,6 +500,15 @@ init([Index]) ->
     PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
     TentativeVersions = ets:new(tentative_versions, []), 
 
+    Stats = ets:new(stats, []),
+    ets:insert(Stats, {received_prepare_messages, 0}),
+    ets:insert(Stats, {prepare_result_messages, 0}),
+    ets:insert(Stats, {received_commit_messages, 0}),
+    ets:insert(Stats, {prepare_commit_result_messages, 0}),
+    ets:insert(Stats, {received_prepare_commit_messages, 0}),
+    ets:insert(Stats, {commit_result_messages, 0}),
+    erlang:send_after(60000, self(), print_stats),
+
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
             %% Get the backend capabilities
@@ -527,7 +537,8 @@ init([Index]) ->
                            update_hook = update_hook(),
                            two_phase_commit_server = TwoPhaseCommitServer,
                            pending_transactional_gets = PendingTransactionalGets,
-                           tentative_versions = TentativeVersions},
+                           tentative_versions = TentativeVersions,
+                           stats = Stats},
 
             try_set_vnode_lock_limit(Index),
 
@@ -1202,6 +1213,26 @@ terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) 
     riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
 
+handle_info(print_stats, #state{stats = Stats} = State) ->
+    ReceivedPrepareMessages = ets:lookup_element(Stats, received_prepare_messages, 2),
+    PrepareResultMessages = ets:lookup_element(Stats, prepare_result_messages, 2),
+    ReceivedCommitMessages = ets:lookup_element(Stats, received_commit_messages, 2),
+    CommitResultMessages = ets:lookup_element(Stats, commit_result_messages, 2),
+    ReceivedPrepareCommitMessages = ets:lookup_element(Stats, received_prepare_commit_messages, 2),
+    PrepareCommitResultMessages = ets:lookup_element(Stats, prepare_commit_result_messages, 2),
+
+    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
+    lager:info("received_prepare_messages = ~p~n", [ReceivedPrepareMessages]),
+    lager:info("prepare_result_messages = ~p~n", [PrepareResultMessages]),
+    lager:info("received_commit_messages = ~p~n", [ReceivedCommitMessages]),
+    lager:info("commit_result_messages = ~p~n", [CommitResultMessages]),
+    lager:info("received_prepare_commit_messages = ~p~n", [ReceivedPrepareCommitMessages]),
+    lager:info("prepare_commit_result_messages = ~p~n", [PrepareCommitResultMessages]),
+
+    erlang:send_after(60000, self(), print_stats),
+
+    {ok, State};
+
 handle_info({{w1c_async_put, From, Type, Bucket, Key, EncodedVal, StartTS} = _Context, Reply},
             State=#state{idx=Idx, update_hook=UpdateHook}) ->
     update_hashtree(Bucket, Key, EncodedVal, State),
@@ -1495,9 +1526,13 @@ handle_prepare_transaction_request(
   Sender,
   #state{idx = Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = TentativeVersions,
+         stats = Stats} = State
 ) ->
     lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    ReceivedPrepareMessages = ets:lookup_element(Stats, received_prepare_messages, 2),
+    ets:insert(Stats, {received_prepare_messages, ReceivedPrepareMessages + 1}),
 
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
@@ -1524,6 +1559,9 @@ handle_prepare_transaction_request(
             ok
     end,
     
+    PrepareResultMessages = ets:lookup_element(Stats, prepare_result_messages, 2),
+    ets:insert(Stats, {prepare_result_messages, PrepareResultMessages + 1}),
+
     riak_core_vnode:reply(Sender, {prepare_result, PrepareResult}),
     State.
 
@@ -1533,9 +1571,13 @@ handle_commit_transaction_request(
   #state{idx = Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = TentativeVersions,
+         stats = Stats} = State
 ) ->
     lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    ReceivedCommitMessages = ets:lookup_element(Stats, received_commit_messages, 2),
+    ets:insert(Stats, {received_commit_messages, ReceivedCommitMessages + 1}),
     
     Id = riak_kv_requests:get_id(Req),
     Gets = riak_kv_requests:get_gets(Req),
@@ -1591,6 +1633,9 @@ handle_commit_transaction_request(
             NewState1 = State
     end,
 
+    CommitResultMessages = ets:lookup_element(Stats, commit_result_messages, 2),
+    ets:insert(Stats, {commit_result_messages, CommitResultMessages + 1}),
+
     riak_core_vnode:reply(Sender, {commit_result, ok}),
 
     % Handle pending transactional get requests
@@ -1609,9 +1654,13 @@ handle_prepare_commit_transaction_request(
   Req,
   Sender,
   #state{idx = Idx,
-         two_phase_commit_server = TwoPhaseCommitServer} = State
+         two_phase_commit_server = TwoPhaseCommitServer,
+         stats = Stats} = State
 ) ->
     lager:info("Handling prepare commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+
+    ReceivedPrepareCommitMessages = ets:lookup_element(Stats, received_prepare_commit_messages, 2),
+    ets:insert(Stats, {received_prepare_commit_messages, ReceivedPrepareCommitMessages + 1}),
 
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
@@ -1641,6 +1690,9 @@ handle_prepare_commit_transaction_request(
     % Release locks
     ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, NbkeyPuts, PrepareResult),
     
+    PrepareCommitResultMessages = ets:lookup_element(Stats, prepare_commit_result_messages, 2),
+    ets:insert(Stats, {prepare_commit_result_messages, PrepareCommitResultMessages + 1}),
+
     riak_core_vnode:reply(Sender, {prepare_commit_result, PrepareResult}),
 
     NewState.
