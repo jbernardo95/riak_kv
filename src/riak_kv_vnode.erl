@@ -499,9 +499,9 @@ init([Index]) ->
     TentativeVersions = ets:new(tentative_versions, []), 
 
     Stats = ets:new(stats, []), 
-    ets:insert(Stats, {received_commit_transaction_request_messages, 0}), 
-    ets:insert(Stats, {received_transaction_validation_batch_messages, 0}), 
-    ets:insert(Stats, {received_transaction_validation_messages, 0}), 
+    ets:insert(Stats, {client_leaf, 0}), 
+    ets:insert(Stats, {leaf_leaf, 0}), 
+    ets:insert(Stats, {root_leaf, 0}), 
     erlang:send_after(60000, self(), print_stats),
 
     case catch Mod:start(Index, Configuration) of
@@ -1208,14 +1208,14 @@ terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) 
     ok.
 
 handle_info(print_stats, #state{stats = Stats} = State) ->
-    ReceivedCommitTransactionRequestMessages = ets:lookup_element(Stats, received_commit_transaction_request_messages, 2),
-    ReceivedTransactionValidationBatchMessages = ets:lookup_element(Stats, received_transaction_validation_batch_messages, 2),
-    ReceivedTransactionValidationMessages = ets:lookup_element(Stats, received_transaction_validation_messages, 2),
+    ClientLeaf = ets:lookup_element(Stats, client_leaf, 2),
+    LeafLeaf = ets:lookup_element(Stats, leaf_leaf, 2),
+    RootLeaf = ets:lookup_element(Stats, root_leaf, 2),
 
-    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
-    lager:info("received_commit_transaction_request_messages = ~p~n", [ReceivedCommitTransactionRequestMessages]),
-    lager:info("received_transaction_validation_batch_messages = ~p~n", [ReceivedTransactionValidationBatchMessages]),
-    lager:info("received_transaction_validation_messages = ~p~n", [ReceivedTransactionValidationMessages]),
+    lager:info("### ~p COUNT STATS ###~n" ++
+               "client_leaf = ~p~n" ++
+               "leaf_leaf = ~p~n" ++
+               "root_leaf = ~p~n", [?MODULE, ClientLeaf, LeafLeaf, RootLeaf]),
 
     erlang:send_after(60000, self(), print_stats),
 
@@ -1515,8 +1515,8 @@ handle_commit_transaction_request(
 ) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
-    ReceivedCommitTransactionRequestMessages = ets:lookup_element(Stats, received_commit_transaction_request_messages, 2),
-    ets:insert(Stats, {received_commit_transaction_request_messages, ReceivedCommitTransactionRequestMessages + 1}),
+    ClientLeaf = ets:lookup_element(Stats, client_leaf, 2),
+    ets:insert(Stats, {client_leaf, ClientLeaf + 1}),
 
     % Save puts as tentative 
     Puts = riak_kv_requests:get_puts(Req),
@@ -1543,8 +1543,8 @@ handle_commit_transaction_request(
 handle_transaction_validation_request(Req, _Sender, #state{idx = Idx, stats = Stats} = State) ->
     lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
 
-    ReceivedTransactionValidationMessages = ets:lookup_element(Stats, received_transaction_validation_messages, 2),
-    ets:insert(Stats, {received_transaction_validation_messages, ReceivedTransactionValidationMessages + 1}),
+    LeafLeaf = ets:lookup_element(Stats, leaf_leaf, 2),
+    ets:insert(Stats, {leaf_leaf, LeafLeaf + 1}),
     
     Id = riak_kv_requests:get_id(Req),
     Puts = riak_kv_requests:get_puts(Req),
@@ -1556,8 +1556,8 @@ handle_transaction_validation_request(Req, _Sender, #state{idx = Idx, stats = St
 handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx, stats = Stats} = State) ->
     lager:info("Handling transaction validation batch request at vnode ~p~n", [Idx]),
 
-    ReceivedTransactionValidationBatchMessages = ets:lookup_element(Stats, received_transaction_validation_batch_messages, 2),
-    ets:insert(Stats, {received_transaction_validation_batch_messages, ReceivedTransactionValidationBatchMessages + 1}),
+    RootLeaf = ets:lookup_element(Stats, root_leaf, 2),
+    ets:insert(Stats, {root_leaf, RootLeaf + 1}),
 
     TransactionsValidationBatch = riak_kv_requests:get_transaction_validation_batch(Req),
 

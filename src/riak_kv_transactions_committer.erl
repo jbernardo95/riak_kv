@@ -47,7 +47,7 @@ init(Id) ->
     erlang:send(self(), send_batch),
 
     ets:new(?STATS, [private, named_table]), 
-    ets:insert(?STATS, {client_transaction_validation_messages, 0}), 
+    ets:insert(?STATS, {to_client, 0}), 
     erlang:send_after(60000, self(), print_stats),
 
     State = #state{id = Id},
@@ -68,10 +68,10 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 handle_info(print_stats, State) ->
-    ClientTransactionValidationMessages = ets:lookup_element(?STATS, client_transaction_validation_messages, 2),
+    ToClient = ets:lookup_element(?STATS, to_client, 2),
 
-    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
-    lager:info("### client_transaction_validation_messages = ~p~n", [ClientTransactionValidationMessages]),
+    lager:info("### ~p COUNT STATS ###~n" ++
+               "to_client = ~p~n", [?MODULE, ToClient]),
 
     erlang:send_after(60000, self(), print_stats),
 
@@ -239,8 +239,8 @@ root_commit(TransactionId, _Snapshot, _Gets, Puts, _NValidations, Client, Confli
     lager:info("Transaction ~p committed~n", [TransactionId]).
 
 send_validation_result_to_client(TransactionId, Lsn, Client, Conflicts) ->
-    ClientTransactionValidationMessages = ets:lookup_element(?STATS, client_transaction_validation_messages, 2),
-    ets:insert(?STATS, {client_transaction_validation_messages, ClientTransactionValidationMessages + 1}),
+    ToClient = ets:lookup_element(?STATS, to_client, 2),
+    ets:insert(?STATS, {to_client, ToClient + 1}),
 
     Reply = {transaction_commit_result, TransactionId, Conflicts, Lsn},
     riak_core_vnode:reply(Client, Reply).

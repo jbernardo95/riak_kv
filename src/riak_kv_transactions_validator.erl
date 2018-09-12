@@ -41,7 +41,7 @@ init(Id) ->
     ets:new(?RUNNING_TRANSACTIONS, [private, named_table]), 
 
     ets:new(?STATS, [private, named_table]), 
-    ets:insert(?STATS, {received_batch_validate_messages, 0}), 
+    ets:insert(?STATS, {leaf_root, 0}), 
     erlang:send_after(60000, self(), print_stats),
 
     {ok, NNodes} = application:get_env(riak_kv, transactions_manager_tree_n_nodes),
@@ -66,10 +66,10 @@ handle_cast(Request, State) ->
     {noreply, State}.
 
 handle_info(print_stats, State) ->
-    ReceivedBatchValidateMessages = ets:lookup_element(?STATS, received_batch_validate_messages, 2),
+    LeafRoot = ets:lookup_element(?STATS, leaf_root, 2),
 
-    lager:info("### ~p COUNT STATS ###~n", [?MODULE]),
-    lager:info("### received_batch_validate_messages = ~p~n", [ReceivedBatchValidateMessages]),
+    lager:info("### ~p COUNT STATS ###~n" ++
+               "leaf_root = ~p~n", [?MODULE, LeafRoot]),
 
     erlang:send_after(60000, self(), print_stats),
 
@@ -126,8 +126,8 @@ generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
 do_batch_validate(TransactionsBatch, State) ->
     lager:info("Received batch of transactions to validate~n", []),
 
-    ReceivedBatchValidateMessages = ets:lookup_element(?STATS, received_batch_validate_messages, 2),
-    ets:insert(?STATS, {received_batch_validate_messages, ReceivedBatchValidateMessages + 1}),
+    LeafRoot = ets:lookup_element(?STATS, leaf_root, 2),
+    ets:insert(?STATS, {leaf_root, LeafRoot + 1}),
 
     lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}) ->
                           NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
