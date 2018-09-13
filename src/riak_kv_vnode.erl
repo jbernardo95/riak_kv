@@ -815,10 +815,32 @@ handle_request(kv_transactional_get_request, Req, Sender, State) ->
     NewState = handle_transactional_get_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_prepare_transaction_request, Req, Sender, State) ->
-    NewState = handle_prepare_transaction_request(Req, Sender, State),
+    Random = random:uniform(20),
+    NewState = case Random of
+                   1 ->
+                       {ok, Tracer} = fprof:profile(start),
+                       fprof:trace([start, {tracer, Tracer}]),
+                       NewState1 = handle_prepare_transaction_request(Req, Sender, State),
+                       fprof:trace(stop),
+                       fprof:analyse([{dest, "/trace/handle_prepare_transaction_request.profile"}, {cols, 120}]),
+                       NewState1;
+                   _ ->
+                       handle_prepare_transaction_request(Req, Sender, State)
+               end,
     {noreply, NewState};
 handle_request(kv_batch_commit_transactions_request, Req, Sender, State) ->
-    NewState = handle_batch_commit_transactions_request(Req, Sender, State),
+    Random = random:uniform(20),
+    NewState = case Random of
+                   1 ->
+                       {ok, Tracer} = fprof:profile(start),
+                       fprof:trace([start, {tracer, Tracer}]),
+                       NewState1 = handle_batch_commit_transactions_request(Req, Sender, State),
+                       fprof:trace(stop),
+                       fprof:analyse([{dest, "/trace/handle_batch_commit_transactions_request.profile"}, {cols, 120}]),
+                       NewState1;
+                   _ ->
+                       handle_batch_commit_transactions_request(Req, Sender, State)
+               end,
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
