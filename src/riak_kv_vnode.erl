@@ -1492,8 +1492,16 @@ handle_commit_transaction_request(
 ) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
-    % Save puts as tentative 
+    TransactionId = riak_kv_requests:get_id(Req),
+    Snapshot = riak_kv_requests:get_snapshot(Req),
+    Gets = riak_kv_requests:get_gets(Req),
     Puts = riak_kv_requests:get_puts(Req),
+    NValidations = riak_kv_requests:get_n_validations(Req),
+
+    % Send transaction to the transactions manager for validation
+    riak_kv_transactions_manager:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
+
+    % Save puts as tentative 
     lists:foreach(fun(Object) ->
                           Bkey = riak_object:bkey(Object),
                           [TentativeContent] = riak_object:get_contents(Object),
@@ -1504,13 +1512,6 @@ handle_commit_transaction_request(
                                   ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
                           end
                   end, Puts),
-
-    % Send transaction to the transactions manager for validation
-    TransactionId = riak_kv_requests:get_id(Req),
-    Snapshot = riak_kv_requests:get_snapshot(Req),
-    Gets = riak_kv_requests:get_gets(Req),
-    NValidations = riak_kv_requests:get_n_validations(Req),
-    riak_kv_transactions_manager:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
 
     State.
 
@@ -1534,10 +1535,7 @@ handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx} = St
                 end, State, TransactionsValidationBatch).
 
 do_handle_transaction_validation_request(
-  Id,
-  Puts,
-  Conflicts,
-  Lsn, 
+  Id, Puts, Conflicts, Lsn, 
   #state{pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions} = State
 ) ->

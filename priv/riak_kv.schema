@@ -824,10 +824,3 @@
     {default, 'riak@127.0.0.1'},
     {commented, 'riak@127.0.0.1'}
 ]}.
-
-%% @doc Specifies the maximum number of transactions kept by the transactions validators
-{mapping, "transactions_manager.validator.maximum_object_versions", "riak_kv.transactions_validator_maximum_object_versions", [
-    {datatype, integer},
-    {default, 250},
-    {commented, 250}
-]}.
