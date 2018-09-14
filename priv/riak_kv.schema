@@ -824,3 +824,10 @@
     {default, 'riak@127.0.0.1'},
     {commented, 'riak@127.0.0.1'}
 ]}.
+
+%% @doc Specifies the timeout used by the tx manager to ship a batch if it does not reach the transactions_manager.batch_size
+{mapping, "transactions_manager.move_lsn_forward_interval", "riak_kv.transactions_manager_move_lsn_forward_interval", [
+    {datatype, integer},
+    {default, 1000},
+    {commented, 1000}
+]}.

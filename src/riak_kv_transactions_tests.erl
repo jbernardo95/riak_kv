@@ -6,8 +6,8 @@ run(Vnodes) ->
     io:format("WARNING~n", []),
     io:format("The tests in this module assume the following deploy scenario and configuration:~n", []),
     io:format("- 2 vnodes~n", []),
-    io:format("- transactions manager tree with 3 nodes~n", []),
     io:format("- maximum_object_versions = 5 ~n", []),
+    io:format("- transactions_manager_tree_n_nodes = 3~n", []),
 
     blind_write_transaction(Vnodes),
     read_write_transaction(Vnodes),
