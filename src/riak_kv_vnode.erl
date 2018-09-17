@@ -1356,12 +1356,12 @@ handle_exit(_Pid, Reason, State) ->
 handle_transactional_get_request(
   Req,
   Sender,
-  #state{idx = Idx, 
+  #state{idx = _Idx, 
          two_phase_commit_server = _TwoPhaseCommitServer,
          pending_transactional_gets = _PendingTransactionalGets,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
     %Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1496,13 +1496,13 @@ handle_transactional_get_request(
     %lists:foldl(SelectFun, nil, Contents).
 
 handle_prepare_transaction_request(
-  Req,
+  _Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = _TwoPhaseCommitServer,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     %Snapshot = riak_kv_requests:get_snapshot(Req),
     %Gets = riak_kv_requests:get_gets(Req),
@@ -1534,14 +1534,14 @@ handle_prepare_transaction_request(
     State.
 
 handle_commit_transaction_request(
-  Req,
+  _Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = _TwoPhaseCommitServer,
          pending_transactional_gets = _PendingTransactionalGets,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
     
     %Id = riak_kv_requests:get_id(Req),
     %Gets = riak_kv_requests:get_gets(Req),
@@ -1612,12 +1612,12 @@ handle_commit_transaction_request(
     State.
 
 handle_prepare_commit_transaction_request(
-  Req,
+  _Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = _TwoPhaseCommitServer} = State
 ) ->
-    lager:info("Handling prepare commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling prepare commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     %Snapshot = riak_kv_requests:get_snapshot(Req),
     %Gets = riak_kv_requests:get_gets(Req),
