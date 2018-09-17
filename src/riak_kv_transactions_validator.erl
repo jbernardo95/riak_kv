@@ -99,75 +99,77 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 % Validates transaction as soon as it arrives
 do_leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
-  #state{id = Id, next_lsn = NextLsn, step = Step} = State
+  #state{id = Id, next_lsn = Lsn, step = _Step} = State
 ) ->
     lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
-    Lsn = generate_lsn(Snapshot, NextLsn, Step),
+    %Lsn = generate_lsn(Snapshot, NextLsn, Step),
 
-    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-    BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
-    lager:info("Leaf validation in progress...~n", []),
-    if
-        BlindWrite ->
-            Conflicts = false,
-            lager:info("Blind write, conflicts false~n", []);
-        true ->
-            Conflicts = check_conflicts(Gets ++ NbkeyPuts, Snapshot),
-            lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
-    end,
+    %NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    %BlindWrite = ((length(Gets) == 0) and (length(Puts) == 1) and (NValidations == 1)),
+    %lager:info("Leaf validation in progress...~n", []),
+    %if
+        %BlindWrite ->
+            %Conflicts = false,
+            %lager:info("Blind write, conflicts false~n", []);
+        %true ->
+            %Conflicts = check_conflicts(Gets ++ NbkeyPuts, Snapshot),
+            %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts])
+    %end,
 
-    if
-        not Conflicts -> update_latest_object_versions(NbkeyPuts, Lsn);
-        true -> ok
-    end,
+    %if
+        %not Conflicts -> update_latest_object_versions(NbkeyPuts, Lsn);
+        %true -> ok
+    %end,
 
+    Conflicts = false,
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
 
-    NewState = State#state{next_lsn = Lsn + Step},
-    {noreply, NewState}.
+    %NewState = State#state{next_lsn = Lsn + Step},
+    {noreply, State}.
 
-generate_lsn(Snapshot, Lsn, _Step) when Lsn > Snapshot ->
-    Lsn;
-generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
-    generate_lsn(Snapshot, Lsn + Step, Step).
+%generate_lsn(Snapshot, Lsn, _Step) when Lsn > Snapshot ->
+    %Lsn;
+%generate_lsn(Snapshot, Lsn, Step) when Lsn =< Snapshot ->
+    %generate_lsn(Snapshot, Lsn + Step, Step).
 
-do_batch_validate(ChildId, TransactionsBatch, #state{id = Id} = State) ->
+do_batch_validate(_ChildId, TransactionsBatch, #state{id = Id} = State) ->
     lager:info("Received batch of transactions to validate~n", []),
 
     % Process batch
     lists:foreach(fun(Message) ->
                           case Message of
                               {transaction, {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn}} ->
-                                  ets:insert(?CHILD_LSNS, {ChildId, Lsn}),
-                                  receive_transaction(TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
-                              {lsn, Lsn} ->
-                                  ets:insert(?CHILD_LSNS, {ChildId, Lsn})
+                                  %ets:insert(?CHILD_LSNS, {ChildId, Lsn}),
+                                  receive_transaction(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn);
+                              {lsn, _Lsn} ->
+                                  %ets:insert(?CHILD_LSNS, {ChildId, Lsn})
+                                  ok
                           end
                   end, TransactionsBatch),
 
     % Validate transactions that can be validated
-    StableLsn = lists:foldl(fun([{_ChildId, Lsn}], Acc) ->
-                                    case Acc of
-                                        undefined -> Lsn;
-                                        _ -> min(Acc, Lsn)
-                                    end
-                            end, undefined, ets:match(?CHILD_LSNS, '$1')),
-    root_validate(Id, StableLsn),
+    %StableLsn = lists:foldl(fun([{_ChildId, Lsn}], Acc) ->
+                                    %case Acc of
+                                        %undefined -> Lsn;
+                                        %_ -> min(Acc, Lsn)
+                                    %end
+                            %end, undefined, ets:match(?CHILD_LSNS, '$1')),
+    %root_validate(Id, StableLsn),
 
     {noreply, State}.
 
 % Transaction validated and commited in one of the leafs
-receive_transaction(
-  _TransactionId, _Snapshot, _Gets, Puts,
-  1 = _NValidations, _Client, _Conflicts, Lsn
+receive_transaction(_Id, 
+  _TransactionId, _Snapshot, _Gets, _Puts,
+  1 = _NValidations, _Client, _Conflicts, _Lsn
 ) ->
-    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-    update_latest_object_versions(NbkeyPuts, Lsn),
+    %NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    %update_latest_object_versions(NbkeyPuts, Lsn),
     ok;
 
 % Transaction partially validated in one of the leafs
-receive_transaction(
+receive_transaction(Id,
   TransactionId, Snapshot, Gets1, Puts1, 
   NValidations, Client, Conflicts1, Lsn1
 ) ->
@@ -188,33 +190,35 @@ receive_transaction(
     [{TransactionId, Gets, Puts, Conflicts, Lsn, ReceivedValidations}] = ets:lookup(?RECEIVE_BUFFER, TransactionId),
     case ReceivedValidations of
         NValidations ->
-            Transaction = {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts},
+            %Transaction = {TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts},
 
-            case ets:lookup(?WAITING_STABILITY, Lsn) of
-                [{Lsn, [WaitingStability]}] ->
-                    ets:insert(?WAITING_STABILITY, {Lsn, [Transaction | WaitingStability]});
-                [] ->
-                    ets:insert(?WAITING_STABILITY, {Lsn, [Transaction]})
-            end,
+            do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn),
+
+            %case ets:lookup(?WAITING_STABILITY, Lsn) of
+                %[{Lsn, [WaitingStability]}] ->
+                    %ets:insert(?WAITING_STABILITY, {Lsn, [Transaction | WaitingStability]});
+                %[] ->
+                    %ets:insert(?WAITING_STABILITY, {Lsn, [Transaction]})
+            %end,
 
             ets:delete(?RECEIVE_BUFFER, TransactionId);
         _ ->
             ok
     end.
 
-root_validate(Id, StableLsn) ->
-    Lsn = ets:first(?WAITING_STABILITY),
-    if
-        Lsn =< StableLsn ->
-            Transactions = ets:lookup_element(?WAITING_STABILITY, Lsn, 2),
-            lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}) ->
-                                  do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn)
-                          end, Transactions),
-            ets:delete(?WAITING_STABILITY, Lsn),
-            root_validate(Id, StableLsn);
-        true ->
-            ok
-    end.
+%root_validate(Id, StableLsn) ->
+    %Lsn = ets:first(?WAITING_STABILITY),
+    %if
+        %Lsn =< StableLsn ->
+            %Transactions = ets:lookup_element(?WAITING_STABILITY, Lsn, 2),
+            %lists:foreach(fun({TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts}) ->
+                                  %do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn)
+                          %end, Transactions),
+            %ets:delete(?WAITING_STABILITY, Lsn),
+            %root_validate(Id, StableLsn);
+        %true ->
+            %ok
+    %end.
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
     lager:info("Conflicts found in lower validator~n", []),
@@ -222,31 +226,32 @@ do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, 
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
     lager:info("Root validation in progress...~n", []),
-    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-    Conflicts = check_conflicts(Gets ++ NbkeyPuts, Snapshot),
+    %NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    %Conflicts = check_conflicts(Gets ++ NbkeyPuts, Snapshot),
+    Conflicts = false,
     lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
-    riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true),
+    riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true).
 
-    if
-        not Conflicts -> update_latest_object_versions(NbkeyPuts, Lsn);
-        true -> ok
-    end.
+    %if
+        %not Conflicts -> update_latest_object_versions(NbkeyPuts, Lsn);
+        %true -> ok
+    %end.
 
-check_conflicts(Objects, Snapshot) ->
-    check_conflicts(Objects, Snapshot, false).
+%check_conflicts(Objects, Snapshot) ->
+    %check_conflicts(Objects, Snapshot, false).
 
-check_conflicts(_Objects, _Snapshot, true) -> true;
-check_conflicts([], _Snapshot, Conflict) -> Conflict;
-check_conflicts([Nbkey | Rest], Snapshot, _Conflict) ->
-    Conflict = case ets:lookup(?LATEST_OBJECT_VERSIONS, Nbkey) of
-                   [{Nbkey, Version}] -> Version > Snapshot;
-                   [] -> false
-               end,
+%check_conflicts(_Objects, _Snapshot, true) -> true;
+%check_conflicts([], _Snapshot, Conflict) -> Conflict;
+%check_conflicts([Nbkey | Rest], Snapshot, _Conflict) ->
+    %Conflict = case ets:lookup(?LATEST_OBJECT_VERSIONS, Nbkey) of
+                   %[{Nbkey, Version}] -> Version > Snapshot;
+                   %[] -> false
+               %end,
 
-    check_conflicts(Rest, Snapshot, Conflict).
+    %check_conflicts(Rest, Snapshot, Conflict).
 
-update_latest_object_versions(Nbkeys, Version) ->
-    lists:foreach(fun(Nbkey) ->
-                          ets:insert(?LATEST_OBJECT_VERSIONS, {Nbkey, Version})
-                  end, Nbkeys).
+%update_latest_object_versions(Nbkeys, Version) ->
+    %lists:foreach(fun(Nbkey) ->
+                          %ets:insert(?LATEST_OBJECT_VERSIONS, {Nbkey, Version})
+                  %end, Nbkeys).

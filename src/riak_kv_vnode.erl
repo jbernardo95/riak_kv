@@ -1354,68 +1354,73 @@ handle_transactional_get_request(
   Req,
   Sender,
   #state{idx = Idx,
-         pending_transactional_gets = PendingTransactionalGets,
-         tentative_versions = TentativeVersions} = State
+         pending_transactional_gets = _PendingTransactionalGets,
+         tentative_versions = _TentativeVersions} = State
 ) ->
     lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
-    Bkey = riak_kv_requests:get_bucket_key(Req),
-    Snapshot = riak_kv_requests:get_snapshot(Req),
-    ReadOnly = riak_kv_requests:get_read_only(Req),
+    {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
+    %Snapshot = riak_kv_requests:get_snapshot(Req),
+    %ReadOnly = riak_kv_requests:get_read_only(Req),
 
-    {reply, {r, Retval, _, _}, State2} = do_get(undefined, Bkey, undefined, State),
-    Reply = case Retval of
-                {ok, Object} ->
-                    Bkey = riak_object:bkey(Object),
-                    ObjectContents = riak_object:get_contents(Object),
-                    TentativeContents = case ets:lookup(TentativeVersions, Bkey) of
-                                            [{Bkey, TentativeContents1}] -> TentativeContents1;
-                                            [] -> []
-                                        end,
-                    SnapshotConsistentContent = select_snapshot_consistent_content(ObjectContents ++ TentativeContents, Snapshot, ReadOnly),
-                    if
-                        SnapshotConsistentContent == nil ->
-                            {error, not_found};
-                        true ->
-                            Version = riak_object:get_metadata_value(SnapshotConsistentContent, <<"version">>, -1),
-                            case Version of
-                                % Selected content has not yet been committed
-                                -1 ->
-                                    TentativeVersion = riak_object:get_metadata_value(SnapshotConsistentContent, <<"tentative_version">>, -1),
-                                    if
-                                        TentativeVersion > Snapshot ->
-                                            {error, conflict};
+    %{reply, {r, Retval, _, _}, State2} = do_get(undefined, Bkey, undefined, State),
+    %Reply = case Retval of
+                %{ok, Object} ->
+                    %Bkey = riak_object:bkey(Object),
+                    %ObjectContents = riak_object:get_contents(Object),
+                    %TentativeContents = case ets:lookup(TentativeVersions, Bkey) of
+                                            %[{Bkey, TentativeContents1}] -> TentativeContents1;
+                                            %[] -> []
+                                        %end,
+                    %SnapshotConsistentContent = select_snapshot_consistent_content(ObjectContents ++ TentativeContents, Snapshot, ReadOnly),
+                    %if
+                        %SnapshotConsistentContent == nil ->
+                            %{error, not_found};
+                        %true ->
+                            %Version = riak_object:get_metadata_value(SnapshotConsistentContent, <<"version">>, -1),
+                            %case Version of
+                                %% Selected content has not yet been committed
+                                %-1 ->
+                                    %TentativeVersion = riak_object:get_metadata_value(SnapshotConsistentContent, <<"tentative_version">>, -1),
+                                    %if
+                                        %TentativeVersion > Snapshot ->
+                                            %{error, conflict};
 
-                                        true ->
-                                            TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
-                                            lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
-                                            case ets:lookup(PendingTransactionalGets, TransactionId) of
-                                                [{TransactionId, PendingTransactionalGetRequests}] ->
-                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGetRequests]});
-                                                [] ->
-                                                    ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
-                                            end,
+                                        %true ->
+                                            %TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
+                                            %%lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+                                            %case ets:lookup(PendingTransactionalGets, TransactionId) of
+                                                %[{TransactionId, PendingTransactionalGetRequests}] ->
+                                                    %ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGetRequests]});
+                                                %[] ->
+                                                    %ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender}]})
+                                            %end,
 
-                                            no_reply
-                                    end;
+                                            %no_reply
+                                    %end;
 
-                                % Selected content has been committed
-                                _ ->
-                                    Object1 = riak_object:set_node(Object, node()),
-                                    Object2 = riak_object:set_contents(Object1, [SnapshotConsistentContent]),
-                                    {ok, Object2}
-                            end
-                    end;
+                                %% Selected content has been committed
+                                %_ ->
+                                    %Object1 = riak_object:set_node(Object, node()),
+                                    %Object2 = riak_object:set_contents(Object1, [SnapshotConsistentContent]),
+                                    %{ok, Object2}
+                            %end
+                    %end;
 
-                Retval -> Retval
-            end,
+                %Retval -> Retval
+            %end,
+    
+    Object = riak_object:new(node(), Bucket, Key),
+    Metadata = dict:store(<<"version">>, 10, dict:new()),
+    Object1 = riak_object:set_contents(Object, [{Metadata, 123}]),
+    riak_core_vnode:reply(Sender, {ok, Object1}),
 
-    case Reply of
-        no_reply -> ok;
-        Reply -> riak_core_vnode:reply(Sender, Reply)
-    end,
+    %case Reply of
+        %no_reply -> ok;
+        %Reply -> riak_core_vnode:reply(Sender, Reply)
+    %end,
 
-    State2.
+    State.
 
 % Selects latest r_content taking in account the snapshot for tentative r_content 
 % 
@@ -1424,33 +1429,33 @@ handle_transactional_get_request(
 %
 % For the following contents list: 1, 2, 5, 8, 10 a client with snapshot 9
 % will get an object with content 10
-select_snapshot_consistent_content(Contents, Snapshot, false = _ReadOnly) ->
-    SelectFun = fun(Content, Acc) ->
-                        ContentVersion = riak_object:get_metadata_value(Content, <<"version">>, -1),
-                        if
-                            Acc == nil -> Content;
-                            Acc /= nil ->
-                                AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
-                                                 -1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
-                                                 Version -> Version
-                                             end,
-                                if
-                                    ContentVersion == -1 -> % Tentative content
-                                        ContentVersion1 = riak_object:get_metadata_value(Content, <<"tentative_version">>, -1),
-                                        if
-                                            ContentVersion1 > AccVersion andalso ContentVersion1 =< Snapshot -> Content;
-                                            true -> Acc
-                                        end;
+%select_snapshot_consistent_content(Contents, Snapshot, false = _ReadOnly) ->
+    %SelectFun = fun(Content, Acc) ->
+                        %ContentVersion = riak_object:get_metadata_value(Content, <<"version">>, -1),
+                        %if
+                            %Acc == nil -> Content;
+                            %Acc /= nil ->
+                                %AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
+                                                 %-1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
+                                                 %Version -> Version
+                                             %end,
+                                %if
+                                    %ContentVersion == -1 -> % Tentative content
+                                        %ContentVersion1 = riak_object:get_metadata_value(Content, <<"tentative_version">>, -1),
+                                        %if
+                                            %ContentVersion1 > AccVersion andalso ContentVersion1 =< Snapshot -> Content;
+                                            %true -> Acc
+                                        %end;
 
-                                    true -> % Committed content
-                                        if
-                                            ContentVersion > AccVersion -> Content;
-                                            true -> Acc
-                                        end
-                                end
-                        end
-                end,
-    lists:foldl(SelectFun, nil, Contents);
+                                    %true -> % Committed content
+                                        %if
+                                            %ContentVersion > AccVersion -> Content;
+                                            %true -> Acc
+                                        %end
+                                %end
+                        %end
+                %end,
+    %lists:foldl(SelectFun, nil, Contents);
 
 % Selects the r_content consistent with the given snapshot
 % 
@@ -1459,36 +1464,36 @@ select_snapshot_consistent_content(Contents, Snapshot, false = _ReadOnly) ->
 %
 % For the following contents list: 1, 2, 5, 8, 10 a client with snapshot 9
 % will get an object with content 8
-select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
-    SelectFun = fun(Content, Acc) ->
-                        ContentVersion = case riak_object:get_metadata_value(Content, <<"version">>, -1) of
-                                             -1 -> riak_object:get_metadata_value(Content, <<"tentative_version">>, -1); 
-                                             Version1 -> Version1
-                                         end,
-                        if
-                            Acc == nil ->
-                                if
-                                    ContentVersion =< Snapshot -> Content;
-                                    true -> Acc
-                                end;
-                            Acc /= nil ->
-                                AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
-                                                 -1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
-                                                 Version2 -> Version2
-                                             end,
-                                if
-                                    ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
-                                    true -> Acc
-                                end
-                        end
-                end,
-    lists:foldl(SelectFun, nil, Contents).
+%select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
+    %SelectFun = fun(Content, Acc) ->
+                        %ContentVersion = case riak_object:get_metadata_value(Content, <<"version">>, -1) of
+                                             %-1 -> riak_object:get_metadata_value(Content, <<"tentative_version">>, -1); 
+                                             %Version1 -> Version1
+                                         %end,
+                        %if
+                            %Acc == nil ->
+                                %if
+                                    %ContentVersion =< Snapshot -> Content;
+                                    %true -> Acc
+                                %end;
+                            %Acc /= nil ->
+                                %AccVersion = case riak_object:get_metadata_value(Acc, <<"version">>, -1) of
+                                                 %-1 -> riak_object:get_metadata_value(Acc, <<"tentative_version">>, -1); 
+                                                 %Version2 -> Version2
+                                             %end,
+                                %if
+                                    %ContentVersion > AccVersion andalso ContentVersion =< Snapshot -> Content;
+                                    %true -> Acc
+                                %end
+                        %end
+                %end,
+    %lists:foldl(SelectFun, nil, Contents).
 
 handle_commit_transaction_request(
   Req,
   Sender,
   #state{idx = Idx,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = _TentativeVersions} = State
 ) ->
     lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
@@ -1502,16 +1507,16 @@ handle_commit_transaction_request(
     riak_kv_transactions_manager:validate_and_commit(TransactionId, Snapshot, Gets, Puts, NValidations, Sender),
 
     % Save puts as tentative 
-    lists:foreach(fun(Object) ->
-                          Bkey = riak_object:bkey(Object),
-                          [TentativeContent] = riak_object:get_contents(Object),
-                          case ets:lookup(TentativeVersions, Bkey) of
-                              [{Bkey, TentativeContents}] ->
-                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
-                              [] ->
-                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
-                          end
-                  end, Puts),
+    %lists:foreach(fun(Object) ->
+                          %Bkey = riak_object:bkey(Object),
+                          %[TentativeContent] = riak_object:get_contents(Object),
+                          %case ets:lookup(TentativeVersions, Bkey) of
+                              %[{Bkey, TentativeContents}] ->
+                                  %ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
+                              %[] ->
+                                  %ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
+                          %end
+                  %end, Puts),
 
     State.
 
@@ -1535,63 +1540,63 @@ handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx} = St
                 end, State, TransactionsValidationBatch).
 
 do_handle_transaction_validation_request(
-  Id, Puts, Conflicts, Lsn, 
-  #state{pending_transactional_gets = PendingTransactionalGets,
-         tentative_versions = TentativeVersions} = State
+  _Id, _Puts, _Conflicts, _Lsn, 
+  #state{pending_transactional_gets = _PendingTransactionalGets,
+         tentative_versions = _TentativeVersions} = State
 ) ->
-    if
-        % Abort by deleting all tentative versions from memory
-        Conflicts ->
-            ForeachFun = fun(Bkey) ->
-                             TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
-                             FilterFun = fun(Content) ->
-                                             TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
-                                             TransactionId /= Id
-                                         end,
-                             NewTentativeContents = lists:filter(FilterFun, TentativeContents),
-                             ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
-                          end,
-            lists:foreach(ForeachFun, Puts),
-            NewState1 = State;
+    %if
+        %% Abort by deleting all tentative versions from memory
+        %Conflicts ->
+            %ForeachFun = fun(Bkey) ->
+                             %TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                             %FilterFun = fun(Content) ->
+                                             %TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                             %TransactionId /= Id
+                                         %end,
+                             %NewTentativeContents = lists:filter(FilterFun, TentativeContents),
+                             %ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+                          %end,
+            %lists:foreach(ForeachFun, Puts),
+            %NewState1 = State;
 
-        % Commit by writing tentative versions to disk and removing them from memory
-        true ->
-            FoldFun = fun({Bucket, Key} = Bkey, Acc) ->
-                          TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
-                          FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
-                                             TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
-                                             if
-                                                 TransactionId == Id -> {Content, NewTentativeContents1};
-                                                 true -> {ContentToCommit1, [Content | NewTentativeContents1]} 
-                                             end
-                                     end,
-                          {ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
+        %% Commit by writing tentative versions to disk and removing them from memory
+        %true ->
+            %FoldFun = fun({Bucket, Key} = Bkey, Acc) ->
+                          %TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                          %FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
+                                             %TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                             %if
+                                                 %TransactionId == Id -> {Content, NewTentativeContents1};
+                                                 %true -> {ContentToCommit1, [Content | NewTentativeContents1]} 
+                                             %end
+                                     %end,
+                          %{ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
 
-                          {Metadata, Value} = ContentToCommit,
-                          Metadata1 = dict:store(<<"version">>, Lsn, Metadata),
-                          Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
-                          Object = riak_object:new(Bucket, Key, nil),
-                          Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
-                          {_, NewAcc} = do_put(Bkey, Object1, 0, 0, [], Acc),
+                          %{Metadata, Value} = ContentToCommit,
+                          %Metadata1 = dict:store(<<"version">>, Lsn, Metadata),
+                          %Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                          %Object = riak_object:new(Bucket, Key, nil),
+                          %Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
+                          %{_, NewAcc} = do_put(Bkey, Object1, 0, 0, [], Acc),
 
-                          ets:insert(TentativeVersions, {Bkey, NewTentativeContents}),
+                          %ets:insert(TentativeVersions, {Bkey, NewTentativeContents}),
 
-                          NewAcc
-                      end,
-            NewState1 = lists:foldl(FoldFun, State, Puts)
-    end,
+                          %NewAcc
+                      %end,
+            %NewState1 = lists:foldl(FoldFun, State, Puts)
+    %end,
 
-    % Handle pending transactional get requests
-    NewState = case ets:lookup(PendingTransactionalGets, Id) of
-                   [{Id, PendingTransactionalGetRequests}] ->
-                       lists:foldl(fun({Req1, Sender1}, Acc) ->
-                                           handle_transactional_get_request(Req1, Sender1, Acc)
-                                   end, NewState1, PendingTransactionalGetRequests);
-                   [] -> NewState1
-               end,
-    ets:delete(PendingTransactionalGets, Id),
+    %% Handle pending transactional get requests
+    %NewState = case ets:lookup(PendingTransactionalGets, Id) of
+                   %[{Id, PendingTransactionalGetRequests}] ->
+                       %lists:foldl(fun({Req1, Sender1}, Acc) ->
+                                           %handle_transactional_get_request(Req1, Sender1, Acc)
+                                   %end, NewState1, PendingTransactionalGetRequests);
+                   %[] -> NewState1
+               %end,
+    %ets:delete(PendingTransactionalGets, Id),
 
-    NewState.
+    State.
 
 %% Optional Callback. A node is about to exit. Ensure that this node doesn't
 %% have any current ensemble members.
