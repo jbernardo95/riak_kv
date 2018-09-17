@@ -1353,11 +1353,11 @@ handle_exit(_Pid, Reason, State) ->
 handle_transactional_get_request(
   Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          pending_transactional_gets = _PendingTransactionalGets,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
     %Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1492,10 +1492,10 @@ handle_transactional_get_request(
 handle_commit_transaction_request(
   Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling commit request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     TransactionId = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1520,8 +1520,8 @@ handle_commit_transaction_request(
 
     State.
 
-handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
+handle_transaction_validation_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling transaction validation request ~p at vnode ~p~n", [Req, Idx]),
     
     Id = riak_kv_requests:get_id(Req),
     Puts = riak_kv_requests:get_puts(Req),
@@ -1530,8 +1530,8 @@ handle_transaction_validation_request(Req, _Sender, #state{idx = Idx} = State) -
 
     do_handle_transaction_validation_request(Id, Puts, Conflicts, Lsn, State).
 
-handle_transaction_validation_batch_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling transaction validation batch request at vnode ~p~n", [Idx]),
+handle_transaction_validation_batch_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling transaction validation batch request at vnode ~p~n", [Idx]),
 
     TransactionsValidationBatch = riak_kv_requests:get_transaction_validation_batch(Req),
 

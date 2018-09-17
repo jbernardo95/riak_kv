@@ -74,7 +74,7 @@ handle_cast(Request, State) ->
 
 handle_info(move_lsn_forward, #state{id = Id, next_lsn = NextLsn, step = Step} = State) ->
     NewNextLsn = NextLsn + Step,
-    lager:info("Moving lsn of validator ~p forward to ~p~n", [Id, NewNextLsn]),
+    %lager:info("Moving lsn of validator ~p forward to ~p~n", [Id, NewNextLsn]),
 
     riak_kv_transactions_committer:propagate_lsn(Id, NewNextLsn),
 
@@ -101,7 +101,7 @@ do_leaf_validate(
   TransactionId, Snapshot, Gets, Puts, NValidations, Client,
   #state{id = Id, next_lsn = Lsn, step = _Step} = State
 ) ->
-    lager:info("Received transaction ~p for validation~n", [TransactionId]),
+    %lager:info("Received transaction ~p for validation~n", [TransactionId]),
 
     %Lsn = generate_lsn(Snapshot, NextLsn, Step),
 
@@ -134,7 +134,7 @@ do_leaf_validate(
     %generate_lsn(Snapshot, Lsn + Step, Step).
 
 do_batch_validate(_ChildId, TransactionsBatch, #state{id = Id} = State) ->
-    lager:info("Received batch of transactions to validate~n", []),
+    %lager:info("Received batch of transactions to validate~n", []),
 
     % Process batch
     lists:foreach(fun(Message) ->
@@ -221,15 +221,15 @@ receive_transaction(Id,
     %end.
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, true = Conflicts, Lsn) ->
-    lager:info("Conflicts found in lower validator~n", []),
+    %lager:info("Conflicts found in lower validator~n", []),
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, false);
 
 do_root_validate(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, false = _Conflicts, Lsn) ->
-    lager:info("Root validation in progress...~n", []),
+    %lager:info("Root validation in progress...~n", []),
     %NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
     %Conflicts = check_conflicts(Gets ++ NbkeyPuts, Snapshot),
     Conflicts = false,
-    lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
+    %lager:info("Transaction ~p validated, conflicts: ~p~n", [TransactionId, Conflicts]),
 
     riak_kv_transactions_committer:commit(Id, TransactionId, Snapshot, Gets, Puts, NValidations, Client, Conflicts, Lsn, true).
 
