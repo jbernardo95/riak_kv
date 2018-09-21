@@ -1359,12 +1359,12 @@ handle_exit(_Pid, Reason, State) ->
 handle_transactional_get_request(
   Req,
   Sender,
-  #state{idx = Idx, 
+  #state{idx = _Idx, 
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions} = State
 ) ->
-    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     Bkey = riak_kv_requests:get_bucket_key(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1395,7 +1395,7 @@ handle_transactional_get_request(
 
                                         true ->
                                             TransactionId = riak_object:get_metadata_value(SnapshotConsistentContent, <<"transaction_id">>, -1),
-                                            lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
+                                            %lager:info("Selected version has not yet been committed, waiting for transaction ~p to be committed~n", [TransactionId]),
                                             case ets:lookup(PendingTransactionalGets, TransactionId) of
                                                 [{TransactionId, PendingTransactionalGetRequests}] ->
                                                     ets:insert(PendingTransactionalGets, {TransactionId, [{Req, Sender} | PendingTransactionalGetRequests]});
@@ -1496,13 +1496,13 @@ select_snapshot_consistent_content(Contents, Snapshot, true = _ReadOnly) ->
 handle_prepare_transaction_request(
   Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
          tentative_versions = TentativeVersions,
          transactions_gets_puts = TransactionsGetsPuts,
          commit_message_batcher = CommitMessageBatcher} = State
 ) ->
-    lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1573,8 +1573,8 @@ handle_prepare_transaction_request(
     
     NewState.
 
-handle_batch_commit_transactions_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
+handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
     
     Batch = riak_kv_requests:get_batch(Req),
 
@@ -1585,13 +1585,13 @@ handle_batch_commit_transactions_request(Req, _Sender, #state{idx = Idx} = State
 do_commit_transaction(
   Id,
   PrepareResult, 
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions,
          transactions_gets_puts = TransactionsGetsPuts} = State
 ) ->
-    lager:info("Committing transaction ~p at vnode ~p~n", [Id, Idx]),
+    %lager:info("Committing transaction ~p at vnode ~p~n", [Id, Idx]),
 
     [{Id, Gets, Puts}] = ets:lookup(TransactionsGetsPuts, Id),
     ets:delete(TransactionsGetsPuts, Id),
