@@ -70,7 +70,7 @@ code_change(_OldVsn, State, _Extra) -> {ok, State}.
 %%%===================================================================
 
 do_add_to_batch(Message, #state{batch_size = BatchSize, batch = Batch} = State) ->
-    lager:info("Adding message (~p) to batch~n", [Message]),
+    %lager:info("Adding message (~p) to batch~n", [Message]),
 
     InsertAt = ets:update_counter(Batch, size, 1),
     ets:insert(Batch, {InsertAt, Message}),
@@ -98,7 +98,7 @@ do_dispatch_batch(
     case CurrentBatchSize of
         0 -> ok;
         _ ->
-            lager:info("Dispatching batch of ~p messages~n", [CurrentBatchSize]),
+            %lager:info("Dispatching batch of ~p messages~n", [CurrentBatchSize]),
             DispatchFun(BatchToSend),
             ets:insert(Batch, {size, 0})
     end,
