@@ -29,9 +29,8 @@
 -export([start_vnode/1,
          start_vnodes/1,
          transactional_get/4,
-         prepare_transaction/4,
-         commit_transaction/5,
-         prepare_commit_transaction/4,
+         prepare_transaction/6,
+         batch_commit_transactions/2,
          get/3,
          get/4,
          del/3,
@@ -148,7 +147,9 @@
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
                 two_phase_commit_server :: pid(),
                 pending_transactional_gets :: ets:tab(),
-                tentative_versions :: ets:tab()}).
+                tentative_versions :: ets:tab(),
+                transactions_gets_puts :: ets:tab(),
+                commit_message_batcher :: pid()}).
 
 -type index_op() :: add | remove.
 -type index_value() :: integer() | binary().
@@ -255,16 +256,12 @@ transactional_get(Preflist, BKey, Snapshot, ReadOnly) ->
     Request = riak_kv_requests:new_transactional_get_request(BKey, Snapshot, ReadOnly),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
-prepare_transaction(Preflist, Snapshot, Gets, Puts) ->
-    Request = riak_kv_requests:new_prepare_transaction_request(Snapshot, Gets, Puts),
+prepare_transaction(Preflist, Id, Snapshot, Gets, Puts, NNodes) ->
+    Request = riak_kv_requests:new_prepare_transaction_request(Id, Snapshot, Gets, Puts, NNodes),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
-commit_transaction(Preflist, Id, Gets, Puts, PrepareResult) ->
-    Request = riak_kv_requests:new_commit_transaction_request(Id, Gets, Puts, PrepareResult),
-    riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
-
-prepare_commit_transaction(Preflist, Snapshot, Gets, Puts) ->
-    Request = riak_kv_requests:new_prepare_commit_transaction_request(Snapshot, Gets, Puts),
+batch_commit_transactions(Preflist, Batch) ->
+    Request = riak_kv_requests:new_batch_commit_transactions_request(Batch),
     riak_core_vnode_master:command(Preflist, Request, {fsm, undefined, self()}, riak_kv_vnode_master).
 
 get(PreflistOrVnodePid, BKey, ReqId) ->
@@ -495,9 +492,18 @@ init([Index]) ->
                 lager:debug("No metadata cache size defined, not starting"),
                 undefined
         end,
+
     {ok, TwoPhaseCommitServer} = riak_kv_transactions_2pc:start_link(), 
     PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
     TentativeVersions = ets:new(tentative_versions, []), 
+    TransactionsGetsPuts = ets:new(transactions_gets_puts, []), 
+
+    {ok, BatchSize} = application:get_env(riak_kv, transactions_batch_size),
+    {ok, BatchTimeout} = application:get_env(riak_kv, transactions_batch_timeout),
+    DispatchFun = fun(Batch) ->
+                          riak_kv_transactions_coordinator:batch_commit({Index, node()}, Batch)
+                  end,
+    {ok, CommitMessageBatcher} = message_batcher:start_link(DispatchFun, BatchSize, BatchTimeout),
 
     case catch Mod:start(Index, Configuration) of
         {ok, ModState} ->
@@ -527,7 +533,9 @@ init([Index]) ->
                            update_hook = update_hook(),
                            two_phase_commit_server = TwoPhaseCommitServer,
                            pending_transactional_gets = PendingTransactionalGets,
-                           tentative_versions = TentativeVersions},
+                           tentative_versions = TentativeVersions,
+                           transactions_gets_puts = TransactionsGetsPuts,
+                           commit_message_batcher = CommitMessageBatcher},
 
             try_set_vnode_lock_limit(Index),
 
@@ -560,9 +568,7 @@ handle_overload_request(kv_transactional_get_request, _Req, Sender, Idx) ->
     erlang:send(Sender, {error, overload, Idx});
 handle_overload_request(kv_prepare_transaction_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
-handle_overload_request(kv_commit_transaction_request, _Req, Sender, Idx) ->
-    riak_core_vnode:reply(Sender, {error, overload, Idx});
-handle_overload_request(kv_prepare_commit_transaction_request, _Req, Sender, Idx) ->
+handle_overload_request(kv_batch_commit_transactions_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {error, overload, Idx});
 handle_overload_request(kv_put_request, _Req, Sender, Idx) ->
     riak_core_vnode:reply(Sender, {fail, Idx, overload});
@@ -808,11 +814,8 @@ handle_request(kv_transactional_get_request, Req, Sender, State) ->
 handle_request(kv_prepare_transaction_request, Req, Sender, State) ->
     NewState = handle_prepare_transaction_request(Req, Sender, State),
     {noreply, NewState};
-handle_request(kv_commit_transaction_request, Req, Sender, State) ->
-    NewState = handle_commit_transaction_request(Req, Sender, State),
-    {noreply, NewState};
-handle_request(kv_prepare_commit_transaction_request, Req, Sender, State) ->
-    NewState = handle_prepare_commit_transaction_request(Req, Sender, State),
+handle_request(kv_batch_commit_transactions_request, Req, Sender, State) ->
+    NewState = handle_batch_commit_transactions_request(Req, Sender, State),
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
@@ -1495,52 +1498,103 @@ handle_prepare_transaction_request(
   Sender,
   #state{idx = Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = TentativeVersions,
+         transactions_gets_puts = TransactionsGetsPuts,
+         commit_message_batcher = CommitMessageBatcher} = State
 ) ->
     lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
+    Id = riak_kv_requests:get_id(Req),
     Snapshot = riak_kv_requests:get_snapshot(Req),
     Gets = riak_kv_requests:get_gets(Req),
     Puts = riak_kv_requests:get_puts(Req),
+    NNodes = riak_kv_requests:get_n_nodes(Req),
+
     NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
 
     % Acquire locks and check if there are conflicts 
-    PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts),
+    BlindWrite = case NNodes of
+                     1 -> (length(Gets) == 0) and (length(Puts) == 1);
+                     _ -> false
+                 end,
+    PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts, BlindWrite),
 
-    % Save puts as tentative if locks are acquired and there are no conflicts
-    case PrepareResult of
-        {prepared, _} ->
-            lists:foreach(fun(Object) ->
-                                  Bkey = riak_object:bkey(Object),
-                                  [TentativeContent] = riak_object:get_contents(Object),
-                                  case ets:lookup(TentativeVersions, Bkey) of
-                                      [{Bkey, TentativeContents}] ->
-                                          ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
-                                      [] ->
-                                          ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
-                                  end
-                          end, Puts);
+    case NNodes of
+        % Only one node involved in the transaction
+        1 ->
+            % Save puts if locks are acquired and there are no conflicts
+            case PrepareResult of
+                {prepared, Timestamp} ->
+                    FoldFun = fun(Object, State1) ->
+                                      Bkey = riak_object:bkey(Object),
+                                      [{Metadata, Value}] = riak_object:get_contents(Object),
+                                      Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
+                                      Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                                      Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
+                                      {_, State2} = do_put(Bkey, Object1, 0, 0, [], State1),
+                                      State2
+                              end,
+                    NewState = lists:foldl(FoldFun, State, Puts);
+                _ ->
+                    NewState = State
+            end,
+
+            % Release locks
+            ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, NbkeyPuts, PrepareResult),
+
+            riak_core_vnode:reply(Sender, {prepare_commit_result, PrepareResult});
+
         _ ->
-            ok
+            % Save puts as tentative if locks are acquired and there are no conflicts
+            case PrepareResult of
+                {prepared, _} ->
+                    lists:foreach(fun(Object) ->
+                                          Bkey = riak_object:bkey(Object),
+                                          [TentativeContent] = riak_object:get_contents(Object),
+                                          case ets:lookup(TentativeVersions, Bkey) of
+                                              [{Bkey, TentativeContents}] ->
+                                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
+                                              [] ->
+                                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
+                                          end
+                                  end, Puts);
+                _ ->
+                    ok
+            end,
+
+            % Save transaction gets and puts
+            ets:insert(TransactionsGetsPuts, {Id, Gets, NbkeyPuts}),
+
+            % Send prepare result to transactions coordinator
+            message_batcher:add_to_batch(CommitMessageBatcher, {Id, NNodes, Sender, PrepareResult}),
+
+            NewState = State
     end,
     
-    riak_core_vnode:reply(Sender, {prepare_result, PrepareResult}),
-    State.
+    NewState.
 
-handle_commit_transaction_request(
-  Req,
-  Sender,
+handle_batch_commit_transactions_request(Req, _Sender, #state{idx = Idx} = State) ->
+    lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
+    
+    Batch = riak_kv_requests:get_batch(Req),
+
+    lists:foldl(fun({Id, PrepareResult}, Acc) ->
+                        do_commit_transaction(Id, PrepareResult, Acc)
+                end, State, Batch).
+
+do_commit_transaction(
+  Id,
+  PrepareResult, 
   #state{idx = Idx,
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
-         tentative_versions = TentativeVersions} = State
+         tentative_versions = TentativeVersions,
+         transactions_gets_puts = TransactionsGetsPuts} = State
 ) ->
-    lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
-    
-    Id = riak_kv_requests:get_id(Req),
-    Gets = riak_kv_requests:get_gets(Req),
-    Puts = riak_kv_requests:get_puts(Req),
-    PrepareResult = riak_kv_requests:get_prepare_result(Req),
+    lager:info("Committing transaction ~p at vnode ~p~n", [Id, Idx]),
+
+    [{Id, Gets, Puts}] = ets:lookup(TransactionsGetsPuts, Id),
+    ets:delete(TransactionsGetsPuts, Id),
 
     ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, Puts, PrepareResult),
 
@@ -1591,8 +1645,6 @@ handle_commit_transaction_request(
             NewState1 = State
     end,
 
-    riak_core_vnode:reply(Sender, {commit_result, ok}),
-
     % Handle pending transactional get requests
     NewState = case ets:lookup(PendingTransactionalGets, Id) of
                    [{Id, PendingTransactionalGetRequests}] ->
@@ -1602,46 +1654,6 @@ handle_commit_transaction_request(
                    [] -> NewState1
                end,
     ets:delete(PendingTransactionalGets, Id),
-
-    NewState.
-
-handle_prepare_commit_transaction_request(
-  Req,
-  Sender,
-  #state{idx = Idx,
-         two_phase_commit_server = TwoPhaseCommitServer} = State
-) ->
-    lager:info("Handling prepare commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
-
-    Snapshot = riak_kv_requests:get_snapshot(Req),
-    Gets = riak_kv_requests:get_gets(Req),
-    Puts = riak_kv_requests:get_puts(Req),
-    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
-
-    % Acquire locks and check if there are conflicts 
-    BlindWrite = (length(Gets) == 0) and (length(Puts) == 1),
-    PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts, BlindWrite),
-
-    % Save puts if locks are acquired and there are no conflicts
-    NewState = case PrepareResult of
-                   {prepared, Timestamp} ->
-                       FoldFun = fun(Object, State1) ->
-                                         Bkey = riak_object:bkey(Object),
-                                         [{Metadata, Value}] = riak_object:get_contents(Object),
-                                         Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
-                                         Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
-                                         Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
-                                         {_, State2} = do_put(Bkey, Object1, 0, 0, [], State1),
-                                         State2
-                                 end,
-                       lists:foldl(FoldFun, State, Puts);
-                    _ -> State
-               end,
-
-    % Release locks
-    ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, NbkeyPuts, PrepareResult),
-    
-    riak_core_vnode:reply(Sender, {prepare_commit_result, PrepareResult}),
 
     NewState.
 

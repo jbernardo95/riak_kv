@@ -3,7 +3,6 @@
 -behaviour(gen_server).
 
 -export([start_link/0,
-         prepare/3,
          prepare/4,
          commit/4,
          move_clock_forward/2]).
@@ -23,9 +22,6 @@
 
 start_link() ->
     gen_server:start_link(?MODULE, [], []).
-
-prepare(ServerRef, Snapshot, Objects) ->
-    gen_server:call(ServerRef, {prepare, Snapshot, Objects, false}).
 
 prepare(ServerRef, Snapshot, Objects, BlindWrite) ->
     gen_server:call(ServerRef, {prepare, Snapshot, Objects, BlindWrite}).

@@ -796,3 +796,17 @@
     {default, 5},
     {commented, 5}
 ]}.
+
+%% @doc Specifies the size of the message batch used in the process of committing a transaction 
+{mapping, "transactions.batch_size", "riak_kv.transactions_batch_size", [
+    {datatype, integer},
+    {default, 50},
+    {commented, 50}
+]}.
+
+%% @doc Specifies the timeout used to force send a message batch if it's size does not reach the transactions.batch_size
+{mapping, "transactions.batch_timeout", "riak_kv.transactions_batch_timeout", [
+    {datatype, integer},
+    {default, 100},
+    {commented, 100}
+]}.

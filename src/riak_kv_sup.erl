@@ -28,7 +28,7 @@
 
 -behaviour(supervisor).
 
--export([start_link/0, start_transactions_manager/1]).
+-export([start_link/0, start_transactions_coordinator/0]).
 
 -export([init/1]).
 
@@ -39,11 +39,11 @@
 start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-start_transactions_manager(Id) ->
-    TransactionsManager = {riak_kv_transactions_manager,
-                           {riak_kv_transactions_manager, start_link, [Id]},
-                           permanent, 5000, supervisor, [riak_kv_transactions_manager]},
-    supervisor:start_child(?MODULE, TransactionsManager).
+start_transactions_coordinator() ->
+    TransactionsCoordinator = {riak_kv_transactions_coordinator,
+                               {riak_kv_transactions_coordinator, start_link, []},
+                               permanent, 5000, supervisor, [riak_kv_transactions_coordinator]},
+    supervisor:start_child(?MODULE, TransactionsCoordinator).
 
 %% @spec init([]) -> SupervisorTree
 %% @doc supervisor callback.
