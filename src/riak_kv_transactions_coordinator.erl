@@ -85,7 +85,7 @@ do_connect_to_vnodes_cluster(VnodeClusterGatewayNode, #state{vnode_message_batch
                   end, Vnodes).
 
 do_batch_commit(Vnode, Batch, #state{prepare_results = PrepareResults, vnode_message_batchers = VnodeMessageBatchers} = State) ->
-    lager:info("Received a batch (~p) of transactions to commit from vnode ~p~n", [Batch, Vnode]),
+    %lager:info("Received a batch (~p) of transactions to commit from vnode ~p~n", [Batch, Vnode]),
 
     lists:foreach(fun({TransactionId, NNodes, Client, PrepareResult}) ->
                           do_commit(Vnode, TransactionId, NNodes, Client, PrepareResult, PrepareResults, VnodeMessageBatchers)
@@ -113,7 +113,7 @@ do_commit(
 
     if
         NewReceivedPrepareResults == NNodes ->
-            lager:info("Committing transaction ~p~n", [TransactionId]),
+            %lager:info("Committing transaction ~p~n", [TransactionId]),
 
             riak_core_vnode:reply(Client, {prepare_commit_result, NewTransactionPrepareResult}),
 

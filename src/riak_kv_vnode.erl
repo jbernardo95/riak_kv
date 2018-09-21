@@ -1359,12 +1359,12 @@ handle_exit(_Pid, Reason, State) ->
 handle_transactional_get_request(
   Req,
   Sender,
-  #state{idx = Idx, 
+  #state{idx = _Idx, 
          two_phase_commit_server = _TwoPhaseCommitServer,
          pending_transactional_gets = _PendingTransactionalGets,
          tentative_versions = _TentativeVersions} = State
 ) ->
-    lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
+    %lager:info("Handling transactional get request ~p at vnode ~p~n", [Req, Idx]),
 
     {Bucket, Key} = riak_kv_requests:get_bucket_key(Req),
     %Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1501,13 +1501,13 @@ handle_transactional_get_request(
 handle_prepare_transaction_request(
   Req,
   Sender,
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = _TwoPhaseCommitServer,
          tentative_versions = _TentativeVersions,
          transactions_gets_puts = _TransactionsGetsPuts,
          commit_message_batcher = CommitMessageBatcher} = State
 ) ->
-    lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
+    %lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
     Id = riak_kv_requests:get_id(Req),
     %Snapshot = riak_kv_requests:get_snapshot(Req),
@@ -1580,8 +1580,8 @@ handle_prepare_transaction_request(
     
     State.
 
-handle_batch_commit_transactions_request(Req, _Sender, #state{idx = Idx} = State) ->
-    lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
+handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx} = State) ->
+    %lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
     
     Batch = riak_kv_requests:get_batch(Req),
 
@@ -1590,15 +1590,15 @@ handle_batch_commit_transactions_request(Req, _Sender, #state{idx = Idx} = State
                 end, State, Batch).
 
 do_commit_transaction(
-  Id,
+  _Id,
   _PrepareResult, 
-  #state{idx = Idx,
+  #state{idx = _Idx,
          two_phase_commit_server = _TwoPhaseCommitServer,
          pending_transactional_gets = _PendingTransactionalGets,
          tentative_versions = _TentativeVersions,
          transactions_gets_puts = _TransactionsGetsPuts} = State
 ) ->
-    lager:info("Committing transaction ~p at vnode ~p~n", [Id, Idx]),
+    %lager:info("Committing transaction ~p at vnode ~p~n", [Id, Idx]),
 
     %[{Id, Gets, Puts}] = ets:lookup(TransactionsGetsPuts, Id),
     %ets:delete(TransactionsGetsPuts, Id),
