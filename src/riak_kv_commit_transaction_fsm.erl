@@ -251,9 +251,12 @@ schedule_timeout(Timeout) ->
 receive_prepare_result(PrepareResult, #state{received_prepare_results = ReceivedPrepareResults} = StateData) ->
     do_receive_prepare_result(PrepareResult, StateData#state{received_prepare_results = ReceivedPrepareResults + 1}).
 
-do_receive_prepare_result(PrepareResult, #state{prepare_result = undefined} = StateData) -> StateData#state{prepare_result = PrepareResult};
-do_receive_prepare_result({aborted, _} = PrepareResult, StateData) -> StateData#state{prepare_result = PrepareResult};
-do_receive_prepare_result(_, #state{prepare_result = {aborted, _}} = StateData) -> StateData;
+do_receive_prepare_result(PrepareResult, #state{prepare_result = undefined} = StateData) ->
+    StateData#state{prepare_result = PrepareResult};
+do_receive_prepare_result({aborted, Timestamp1}, #state{prepare_result = {_, Timestamp2}} = StateData) ->
+    StateData#state{prepare_result = {aborted, max(Timestamp1, Timestamp2)}};
+do_receive_prepare_result({_, Timestamp1}, #state{prepare_result = {aborted, Timestamp2}} = StateData) ->
+    StateData#state{prepare_result = {aborted, max(Timestamp1, Timestamp2)}};
 do_receive_prepare_result({prepared, Timestamp1}, #state{prepare_result = {prepared, Timestamp2}} = StateData) ->
     StateData#state{prepare_result = {prepared, max(Timestamp1, Timestamp2)}}.
 
