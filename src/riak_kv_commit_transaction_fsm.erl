@@ -91,6 +91,7 @@ prepare(
     {ok, Ring} = riak_core_ring_manager:get_raw_ring(),
     {_RingSize, IdxNodes} = element(4, Ring), 
     NodesLength = length(Nodes),
+    ShuffledNodes = [N2 || {_, N2} <- lists:sort([{random:uniform(), N1} || N1 <- Nodes])],
     lists:foreach(fun(Node) ->
                           Vnode = lists:keyfind(Node, 2, IdxNodes),
                           Gets = case dict:find(Node, NodeGets) of
@@ -102,8 +103,9 @@ prepare(
                                      {ok, Puts1} -> Puts1;
                                      error -> []
                                  end,
-                          riak_kv_vnode:prepare_transaction(Vnode, Id, Snapshot, Gets, Puts, NodesLength)
-                  end, Nodes),
+                          riak_kv_vnode:prepare_transaction(Vnode, Id, Snapshot, Gets, Puts, NodesLength),
+                          timer:sleep(random:uniform(5))
+                  end, ShuffledNodes),
 
     TimerRef = schedule_timeout(?DEFAULT_TIMEOUT),
     NewStateData = StateData#state{timerref = TimerRef},
