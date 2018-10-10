@@ -1494,18 +1494,20 @@ handle_prepare_transaction_request(
   Req,
   Sender,
   #state{idx = _Idx,
-         two_phase_commit_server = TwoPhaseCommitServer,
+         %two_phase_commit_server = TwoPhaseCommitServer,
          tentative_versions = TentativeVersions} = State
 ) ->
     %lager:info("Handling prepare transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
 
-    Snapshot = riak_kv_requests:get_snapshot(Req),
-    Gets = riak_kv_requests:get_gets(Req),
+    %Snapshot = riak_kv_requests:get_snapshot(Req),
+    %Gets = riak_kv_requests:get_gets(Req),
     Puts = riak_kv_requests:get_puts(Req),
-    NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
+    %NbkeyPuts = lists:map(fun riak_object:nbkey/1, Puts),
 
-    % Acquire locks and check if there are conflicts 
-    PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts),
+    %% Acquire locks and check if there are conflicts 
+    %PrepareResult = riak_kv_transactions_2pc:prepare(TwoPhaseCommitServer, Snapshot, Gets ++ NbkeyPuts),
+    
+    PrepareResult = {prepared, 1},
 
     % Save puts as tentative if locks are acquired and there are no conflicts
     case PrepareResult of
@@ -1531,18 +1533,18 @@ handle_commit_transaction_request(
   Req,
   Sender,
   #state{idx = _Idx,
-         two_phase_commit_server = TwoPhaseCommitServer,
+         %two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions} = State
 ) ->
     %lager:info("Handling commit transaction request ~p at vnode ~p from ~p~n", [Req, Idx, Sender]),
     
     Id = riak_kv_requests:get_id(Req),
-    Gets = riak_kv_requests:get_gets(Req),
+    %Gets = riak_kv_requests:get_gets(Req),
     Puts = riak_kv_requests:get_puts(Req),
     PrepareResult = riak_kv_requests:get_prepare_result(Req),
 
-    ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, Puts, PrepareResult),
+    %ok = riak_kv_transactions_2pc:commit(TwoPhaseCommitServer, Gets, Puts, PrepareResult),
 
     case PrepareResult of
         % Commit tentative versions to disk
@@ -1566,7 +1568,10 @@ handle_commit_transaction_request(
                           Object = riak_object:set_contents(Object1, [{Metadata2, Value}]),
                           {_, NewAcc} = do_put(Bkey, Object, 0, 0, [], Acc),
 
-                          ets:insert(TentativeVersions, {Bkey, NewTentativeContents}),
+                          case TentativeVersions of
+                              [] -> ets:delete(TentativeVersions, Bkey);
+                              _ -> ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+                          end,
 
                           NewAcc
                       end,
