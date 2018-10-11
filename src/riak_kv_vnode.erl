@@ -1663,28 +1663,30 @@ do_commit_transaction(
 store_new_object_version({Bucket, Key} = Bkey, NewContent, ObjectStore) ->
     case ets:lookup(ObjectStore, Bkey) of
         [{Bkey, OldObject}] ->
-            OldContents = riak_object:get_contents(OldObject),
-            NewContents = append_content(OldContents, NewContent),
-            NewObject = riak_object:set_contents(OldObject, NewContents),
-            ets:insert(ObjectStore, {Bkey, NewObject});
+            %OldContents = riak_object:get_contents(OldObject),
+            %NewContents = append_content(OldContents, NewContent),
+            %NewObject = riak_object:set_contents(OldObject, NewContents),
+            %ets:insert(ObjectStore, {Bkey, NewObject});
+            Object = riak_object:set_contents(OldObject, [NewContent]),
+            ets:insert(ObjectStore, {Bkey, Object});
         [] ->
             Object1 = riak_object:new(Bucket, Key, nil),
             Object = riak_object:set_contents(Object1, [NewContent]),
             ets:insert(ObjectStore, {Bkey, Object})
     end.
 
-append_content(OldContents, NewContent) ->
-    % Sort old contents in descending order
-    SortFun = fun(C1, C2) ->
-                      V1 = riak_object:get_metadata_value(C1, <<"version">>, -1),
-                      V2 = riak_object:get_metadata_value(C2, <<"version">>, -1),
-                      V1 >= V2
-              end,
-    SortedContents = lists:sort(SortFun, OldContents),
+%append_content(OldContents, NewContent) ->
+    %% Sort old contents in descending order
+    %SortFun = fun(C1, C2) ->
+                      %V1 = riak_object:get_metadata_value(C1, <<"version">>, -1),
+                      %V2 = riak_object:get_metadata_value(C2, <<"version">>, -1),
+                      %V1 >= V2
+              %end,
+    %SortedContents = lists:sort(SortFun, OldContents),
 
-    MergedContents = [NewContent | SortedContents],
-    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
-    lists:sublist(MergedContents, MaximumObjectVersions).
+    %MergedContents = [NewContent | SortedContents],
+    %MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
+    %lists:sublist(MergedContents, MaximumObjectVersions).
 
 %% Optional Callback. A node is about to exit. Ensure that this node doesn't
 %% have any current ensemble members.
