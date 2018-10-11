@@ -1565,15 +1565,16 @@ handle_commit_transaction_request(
                           Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
                           Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
                           Object1 = riak_object:new(Bucket, Key, nil),
-                          Object = riak_object:set_contents(Object1, [{Metadata2, Value}]),
-                          {_, NewAcc} = do_put(Bkey, Object, 0, 0, [], Acc),
+                          _Object = riak_object:set_contents(Object1, [{Metadata2, Value}]),
+                          %{_, NewAcc} = do_put(Bkey, Object, 0, 0, [], Acc),
 
                           case TentativeVersions of
                               [] -> ets:delete(TentativeVersions, Bkey);
                               _ -> ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
                           end,
 
-                          NewAcc
+                          %NewAcc
+                          Acc
                       end,
             NewState1 = lists:foldl(FoldFun, State, Puts);
 
