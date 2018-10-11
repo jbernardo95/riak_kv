@@ -145,6 +145,7 @@
                 counter :: #counter_state{},
                 status_mgr_pid :: pid(), %% a process that manages vnode status persistence
                 update_hook = riak_kv_noop_update_hook :: update_hook(),
+                object_store :: ets:tab(),
                 two_phase_commit_server :: pid(),
                 pending_transactional_gets :: ets:tab(),
                 tentative_versions :: ets:tab(),
@@ -493,6 +494,7 @@ init([Index]) ->
                 undefined
         end,
 
+    ObjectStore = ets:new(object_store, []), 
     {ok, TwoPhaseCommitServer} = riak_kv_transactions_2pc:start_link(), 
     PendingTransactionalGets = ets:new(pending_transactional_gets, []), 
     TentativeVersions = ets:new(tentative_versions, []), 
@@ -531,6 +533,7 @@ init([Index]) ->
                            md_cache = MDCache,
                            md_cache_size = MDCacheSize,
                            update_hook = update_hook(),
+                           object_store = ObjectStore,
                            two_phase_commit_server = TwoPhaseCommitServer,
                            pending_transactional_gets = PendingTransactionalGets,
                            tentative_versions = TentativeVersions,
@@ -1360,6 +1363,7 @@ handle_transactional_get_request(
   Req,
   Sender,
   #state{idx = _Idx, 
+         object_store = ObjectStore,
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions} = State
@@ -1370,7 +1374,11 @@ handle_transactional_get_request(
     Snapshot = riak_kv_requests:get_snapshot(Req),
     ReadOnly = riak_kv_requests:get_read_only(Req),
 
-    {reply, {r, Retval, _, _}, State2} = do_get(undefined, Bkey, undefined, State),
+    Retval = case ets:lookup(ObjectStore, Bkey) of
+                 [{Bkey, Obj}] -> {ok, Obj};
+                 [] -> {error, notfound}
+             end,
+
     Reply = case Retval of
                 {ok, Object} ->
                     Bkey = riak_object:bkey(Object),
@@ -1424,7 +1432,7 @@ handle_transactional_get_request(
         Reply -> riak_core_vnode:reply(Sender, Reply)
     end,
 
-    State2.
+    State.
 
 % Selects latest r_content taking in account the snapshot for tentative r_content 
 % 
@@ -1497,6 +1505,7 @@ handle_prepare_transaction_request(
   Req,
   Sender,
   #state{idx = _Idx,
+         object_store = ObjectStore,
          two_phase_commit_server = TwoPhaseCommitServer,
          tentative_versions = TentativeVersions,
          transactions_gets_puts = TransactionsGetsPuts,
@@ -1525,18 +1534,17 @@ handle_prepare_transaction_request(
             % Save puts if locks are acquired and there are no conflicts
             case PrepareResult of
                 {prepared, Timestamp} ->
-                    FoldFun = fun(Object, State1) ->
-                                      Bkey = riak_object:bkey(Object),
-                                      [{Metadata, Value}] = riak_object:get_contents(Object),
-                                      Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
-                                      Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
-                                      Object1 = riak_object:set_contents(Object, [{Metadata2, Value}]),
-                                      {_, State2} = do_put(Bkey, Object1, 0, 0, [], State1),
-                                      State2
-                              end,
-                    NewState = lists:foldl(FoldFun, State, Puts);
+                    ForEachFun = fun(Object) ->
+                                         Bkey = riak_object:bkey(Object),
+                                         [{Metadata, Value}] = riak_object:get_contents(Object),
+                                         Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
+                                         Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                                         NewContent = {Metadata2, Value},
+                                         store_new_object_version(Bkey, NewContent, ObjectStore)
+                                 end,
+                    lists:foreach(ForEachFun, Puts);
                 _ ->
-                    NewState = State
+                    ok
             end,
 
             % Release locks
@@ -1566,12 +1574,10 @@ handle_prepare_transaction_request(
             ets:insert(TransactionsGetsPuts, {Id, Gets, NbkeyPuts}),
 
             % Send prepare result to transactions coordinator
-            message_batcher:add_to_batch(CommitMessageBatcher, {Id, NNodes, Sender, PrepareResult}),
-
-            NewState = State
+            message_batcher:add_to_batch(CommitMessageBatcher, {Id, NNodes, Sender, PrepareResult})
     end,
     
-    NewState.
+    State.
 
 handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx} = State) ->
     %lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
@@ -1586,6 +1592,7 @@ do_commit_transaction(
   Id,
   PrepareResult, 
   #state{idx = _Idx,
+         object_store = ObjectStore,
          two_phase_commit_server = TwoPhaseCommitServer,
          pending_transactional_gets = PendingTransactionalGets,
          tentative_versions = TentativeVersions,
@@ -1601,30 +1608,27 @@ do_commit_transaction(
     case PrepareResult of
         % Commit tentative versions to disk
         {prepared, Timestamp} ->
-            FoldFun = fun({_Node, Bucket, Key}, Acc) ->
-                          Bkey = {Bucket, Key},
-                          TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
-                          FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
-                                             TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
-                                             if
-                                                 TransactionId == Id -> {Content, NewTentativeContents1};
-                                                 true -> {ContentToCommit1, [Content | NewTentativeContents1]}
-                                             end
-                                     end,
-                          {ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
+            ForEachFun = fun({_Node, Bucket, Key}) ->
+                                 Bkey = {Bucket, Key},
+                                 TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                                 FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
+                                                    TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                                    if
+                                                        TransactionId == Id -> {Content, NewTentativeContents1};
+                                                        true -> {ContentToCommit1, [Content | NewTentativeContents1]}
+                                                    end
+                                            end,
+                                 {ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
 
-                          {Metadata, Value} = ContentToCommit,
-                          Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
-                          Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
-                          Object1 = riak_object:new(Bucket, Key, nil),
-                          Object = riak_object:set_contents(Object1, [{Metadata2, Value}]),
-                          {_, NewAcc} = do_put(Bkey, Object, 0, 0, [], Acc),
+                                 {Metadata, Value} = ContentToCommit,
+                                 Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
+                                 Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                                 NewContent = {Metadata2, Value},
+                                 store_new_object_version(Bkey, NewContent, ObjectStore),
 
-                          ets:insert(TentativeVersions, {Bkey, NewTentativeContents}),
-
-                          NewAcc
-                      end,
-            NewState1 = lists:foldl(FoldFun, State, Puts);
+                                 ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+                         end,
+            lists:foreach(ForEachFun, Puts);
 
         % Delete tentative versions from memory
         _ ->
@@ -1641,8 +1645,7 @@ do_commit_transaction(
                              NewTentativeContents = lists:filter(FilterFun, TentativeContents),
                              ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
                           end,
-            lists:foreach(ForeachFun, Puts),
-            NewState1 = State
+            lists:foreach(ForeachFun, Puts)
     end,
 
     % Handle pending transactional get requests
@@ -1650,12 +1653,38 @@ do_commit_transaction(
                    [{Id, PendingTransactionalGetRequests}] ->
                        lists:foldl(fun({Req1, Sender1}, AccState) ->
                                            handle_transactional_get_request(Req1, Sender1, AccState)
-                                   end, NewState1, PendingTransactionalGetRequests);
-                   [] -> NewState1
+                                   end, State, PendingTransactionalGetRequests);
+                   [] -> State 
                end,
     ets:delete(PendingTransactionalGets, Id),
 
     NewState.
+
+store_new_object_version({Bucket, Key} = Bkey, NewContent, ObjectStore) ->
+    case ets:lookup(ObjectStore, Bkey) of
+        [{Bkey, OldObject}] ->
+            OldContents = riak_object:get_contents(OldObject),
+            NewContents = append_content(OldContents, NewContent),
+            NewObject = riak_object:set_contents(OldObject, NewContents),
+            ets:insert(ObjectStore, {Bkey, NewObject});
+        [] ->
+            Object1 = riak_object:new(Bucket, Key, nil),
+            Object = riak_object:set_contents(Object1, [NewContent]),
+            ets:insert(ObjectStore, {Bkey, Object})
+    end.
+
+append_content(OldContents, NewContent) ->
+    % Sort old contents in descending order
+    SortFun = fun(C1, C2) ->
+                      V1 = riak_object:get_metadata_value(C1, <<"version">>, -1),
+                      V2 = riak_object:get_metadata_value(C2, <<"version">>, -1),
+                      V1 >= V2
+              end,
+    SortedContents = lists:sort(SortFun, OldContents),
+
+    MergedContents = [NewContent | SortedContents],
+    MaximumObjectVersions = app_helper:get_env(riak_kv, maximum_object_versions),
+    lists:sublist(MergedContents, MaximumObjectVersions).
 
 %% Optional Callback. A node is about to exit. Ensure that this node doesn't
 %% have any current ensemble members.
