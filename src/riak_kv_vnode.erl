@@ -149,6 +149,7 @@
                 pending_transactional_gets :: ets:tab(),
                 tentative_versions :: ets:tab(),
                 transactions_gets_puts :: ets:tab(),
+                stats :: ets:tab(),
                 commit_message_batcher :: pid()}).
 
 -type index_op() :: add | remove.
@@ -498,6 +499,18 @@ init([Index]) ->
     TentativeVersions = ets:new(tentative_versions, []), 
     TransactionsGetsPuts = ets:new(transactions_gets_puts, []), 
 
+    Stats = ets:new(stats, []), 
+    ets:insert(Stats, {n_gets, 0}),
+    ets:insert(Stats, {max_get_execution_time, -1}),
+    ets:insert(Stats, {min_get_execution_time, -1}),
+    ets:insert(Stats, {n_prepares, 0}),
+    ets:insert(Stats, {max_prepare_execution_time, -1}),
+    ets:insert(Stats, {min_prepare_execution_time, -1}),
+    ets:insert(Stats, {n_commits, 0}),
+    ets:insert(Stats, {max_commit_execution_time, -1}),
+    ets:insert(Stats, {min_commit_execution_time, -1}),
+    erlang:send_after(60000, self(), print_stats),
+
     {ok, BatchSize} = application:get_env(riak_kv, transactions_batch_size),
     {ok, BatchTimeout} = application:get_env(riak_kv, transactions_batch_timeout),
     DispatchFun = fun(Batch) ->
@@ -535,6 +548,7 @@ init([Index]) ->
                            pending_transactional_gets = PendingTransactionalGets,
                            tentative_versions = TentativeVersions,
                            transactions_gets_puts = TransactionsGetsPuts,
+                           stats = Stats,
                            commit_message_batcher = CommitMessageBatcher},
 
             try_set_vnode_lock_limit(Index),
@@ -808,11 +822,63 @@ handle_command(Req, Sender, State) ->
 
 %% @todo: pre record encapsulation there was no catch all clause in handle_command,
 %%        so crashing on unknown should work.
-handle_request(kv_transactional_get_request, Req, Sender, State) ->
+handle_request(kv_transactional_get_request, Req, Sender, #state{stats = Stats} = State) ->
+    StartTimestamp = os:timestamp(),
+
     NewState = handle_transactional_get_request(Req, Sender, State),
+
+    ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
+
+    Random = random:uniform(100),
+    case Random of
+        1 -> lager:info("get execution time ~p~n", [ExecutionTime]);
+        _ -> ok
+    end,
+
+    ets:update_counter(Stats, n_gets, 1),
+
+    MaxGetExecutionTime = ets:lookup_element(Stats, max_get_execution_time, 2),
+    if
+        ExecutionTime > MaxGetExecutionTime -> ets:insert(Stats, {max_get_execution_time, ExecutionTime});
+        true -> ok
+    end,
+
+    MinGetExecutionTime = ets:lookup_element(Stats, min_get_execution_time, 2),
+    if
+        (ExecutionTime < MinGetExecutionTime) or (MinGetExecutionTime == -1) ->
+            ets:insert(Stats, {min_get_execution_time, ExecutionTime});
+        true -> ok
+    end,
+
     {noreply, NewState};
-handle_request(kv_prepare_transaction_request, Req, Sender, State) ->
+handle_request(kv_prepare_transaction_request, Req, Sender, #state{stats = Stats} = State) ->
+    StartTimestamp = os:timestamp(),
+
     NewState = handle_prepare_transaction_request(Req, Sender, State),
+
+    ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
+
+    Random = random:uniform(100),
+    case Random of
+        1 -> lager:info("prepare execution time ~p~n", [ExecutionTime]);
+        _ -> ok
+    end,
+
+    ets:update_counter(Stats, n_prepares, 1),
+
+    MaxPrepareExecutionTime = ets:lookup_element(Stats, max_prepare_execution_time, 2),
+    if
+        ExecutionTime > MaxPrepareExecutionTime -> ets:insert(Stats, {max_prepare_execution_time, ExecutionTime});
+        true -> ok
+    end,
+
+    MinPrepareExecutionTime = ets:lookup_element(Stats, min_prepare_execution_time, 2),
+    if
+        (ExecutionTime < MinPrepareExecutionTime) or (MinPrepareExecutionTime == -1) ->
+            ets:insert(Stats, {min_prepare_execution_time, ExecutionTime});
+        true -> ok
+    end,
+
     {noreply, NewState};
 handle_request(kv_batch_commit_transactions_request, Req, Sender, State) ->
     NewState = handle_batch_commit_transactions_request(Req, Sender, State),
@@ -1205,6 +1271,40 @@ terminate(_Reason, #state{idx=Idx, mod=Mod, modstate=ModState,hashtrees=Trees}) 
     riak_kv_stat:unregister_vnode_stats(Idx),
     ok.
 
+handle_info(print_stats, #state{stats = Stats} = State) ->
+    lager:info("####################~n", []),
+
+    NGets = ets:lookup_element(Stats, n_gets, 2),
+    lager:info("n_gets ~p~n", [NGets]),
+    MaxGetExecutionTime = ets:lookup_element(Stats, max_get_execution_time, 2),
+    lager:info("max_get_execution_time ~p~n", [MaxGetExecutionTime]),
+    MinGetExecutionTime = ets:lookup_element(Stats, min_get_execution_time, 2),
+    lager:info("min_get_execution_time ~p~n", [MinGetExecutionTime]),
+
+    lager:info("##########~n", []),
+
+    NPrepares = ets:lookup_element(Stats, n_prepares, 2),
+    lager:info("n_prepares ~p~n", [NPrepares]),
+    MaxPrepareExecutionTime = ets:lookup_element(Stats, max_prepare_execution_time, 2),
+    lager:info("max_prepare_execution_time ~p~n", [MaxPrepareExecutionTime]),
+    MinPrepareExecutionTime = ets:lookup_element(Stats, min_prepare_execution_time, 2),
+    lager:info("min_prepare_execution_time ~p~n", [MinPrepareExecutionTime]),
+
+    lager:info("##########~n", []),
+
+    NCommits = ets:lookup_element(Stats, n_commits, 2),
+    lager:info("n_commits ~p~n", [NCommits]),
+    MaxCommitExecutionTime = ets:lookup_element(Stats, max_commit_execution_time, 2),
+    lager:info("max_commit_execution_time ~p~n", [MaxCommitExecutionTime]),
+    MinCommitExecutionTime = ets:lookup_element(Stats, min_commit_execution_time, 2),
+    lager:info("min_commit_execution_time ~p~n", [MinCommitExecutionTime]),
+
+    lager:info("####################~n", []),
+
+    erlang:send_after(60000, self(), print_stats),
+
+    {ok, State};
+
 handle_info({{w1c_async_put, From, Type, Bucket, Key, EncodedVal, StartTS} = _Context, Reply},
             State=#state{idx=Idx, update_hook=UpdateHook}) ->
     update_hashtree(Bucket, Key, EncodedVal, State),
@@ -1573,13 +1673,40 @@ handle_prepare_transaction_request(
     
     NewState.
 
-handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx} = State) ->
+handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx, stats = Stats} = State) ->
     %lager:info("Handling batch commit transactions request ~p at vnode ~p~n", [Req, Idx]),
     
     Batch = riak_kv_requests:get_batch(Req),
 
     lists:foldl(fun({Id, PrepareResult}, Acc) ->
-                        do_commit_transaction(Id, PrepareResult, Acc)
+                        StartTimestamp = os:timestamp(),
+
+                        NewState = do_commit_transaction(Id, PrepareResult, Acc),
+
+                        ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
+
+                        Random = random:uniform(100),
+                        case Random of
+                            1 -> lager:info("commit execution time ~p~n", [ExecutionTime]);
+                            _ -> ok
+                        end,
+
+                        ets:update_counter(Stats, n_commits, 1),
+
+                        MaxCommitExecutionTime = ets:lookup_element(Stats, max_commit_execution_time, 2),
+                        if
+                            ExecutionTime > MaxCommitExecutionTime -> ets:insert(Stats, {max_commit_execution_time, ExecutionTime});
+                            true -> ok
+                        end,
+
+                        MinCommitExecutionTime = ets:lookup_element(Stats, min_commit_execution_time, 2),
+                        if
+                            (ExecutionTime < MinCommitExecutionTime) or (MinCommitExecutionTime == -1) ->
+                                ets:insert(Stats, {min_commit_execution_time, ExecutionTime});
+                            true -> ok
+                        end,
+
+                        NewState
                 end, State, Batch).
 
 do_commit_transaction(
