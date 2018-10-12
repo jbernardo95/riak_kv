@@ -1507,7 +1507,7 @@ handle_prepare_transaction_request(
   #state{idx = _Idx,
          object_store = ObjectStore,
          two_phase_commit_server = TwoPhaseCommitServer,
-         tentative_versions = TentativeVersions,
+         tentative_versions = _TentativeVersions,
          transactions_gets_puts = TransactionsGetsPuts,
          commit_message_batcher = CommitMessageBatcher} = State
 ) ->
@@ -1554,21 +1554,21 @@ handle_prepare_transaction_request(
 
         _ ->
             % Save puts as tentative if locks are acquired and there are no conflicts
-            case PrepareResult of
-                {prepared, _} ->
-                    lists:foreach(fun(Object) ->
-                                          Bkey = riak_object:bkey(Object),
-                                          [TentativeContent] = riak_object:get_contents(Object),
-                                          case ets:lookup(TentativeVersions, Bkey) of
-                                              [{Bkey, TentativeContents}] ->
-                                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
-                                              [] ->
-                                                  ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
-                                          end
-                                  end, Puts);
-                _ ->
-                    ok
-            end,
+            %case PrepareResult of
+                %{prepared, _} ->
+                    %lists:foreach(fun(Object) ->
+                                          %Bkey = riak_object:bkey(Object),
+                                          %[TentativeContent] = riak_object:get_contents(Object),
+                                          %case ets:lookup(TentativeVersions, Bkey) of
+                                              %[{Bkey, TentativeContents}] ->
+                                                  %ets:insert(TentativeVersions, {Bkey, [TentativeContent | TentativeContents]});
+                                              %[] ->
+                                                  %ets:insert(TentativeVersions, {Bkey, [TentativeContent]})
+                                          %end
+                                  %end, Puts);
+                %_ ->
+                    %ok
+            %end,
 
             % Save transaction gets and puts
             ets:insert(TransactionsGetsPuts, {Id, Gets, NbkeyPuts}),
@@ -1610,23 +1610,27 @@ do_commit_transaction(
         {prepared, Timestamp} ->
             ForEachFun = fun({_Node, Bucket, Key}) ->
                                  Bkey = {Bucket, Key},
-                                 TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
-                                 FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
-                                                    TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
-                                                    if
-                                                        TransactionId == Id -> {Content, NewTentativeContents1};
-                                                        true -> {ContentToCommit1, [Content | NewTentativeContents1]}
-                                                    end
-                                            end,
-                                 {ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
+                                 %TentativeContents = ets:lookup_element(TentativeVersions, Bkey, 2),
+                                 %FoldFun1 = fun(Content, {ContentToCommit1, NewTentativeContents1}) ->
+                                                    %TransactionId = riak_object:get_metadata_value(Content, <<"transaction_id">>, -1),
+                                                    %if
+                                                        %TransactionId == Id -> {Content, NewTentativeContents1};
+                                                        %true -> {ContentToCommit1, [Content | NewTentativeContents1]}
+                                                    %end
+                                            %end,
+                                 %{ContentToCommit, NewTentativeContents} = lists:foldl(FoldFun1, {undefined, []}, TentativeContents),
 
-                                 {Metadata, Value} = ContentToCommit,
-                                 Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
-                                 Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
-                                 NewContent = {Metadata2, Value},
-                                 store_new_object_version(Bkey, NewContent, ObjectStore),
+                                 %{Metadata, Value} = ContentToCommit,
+                                 %Metadata1 = dict:store(<<"version">>, Timestamp, Metadata),
+                                 %Metadata2 = dict:erase(<<"tentative_version">>, Metadata1),
+                                 %NewContent = {Metadata2, Value},
+                                 %store_new_object_version(Bkey, NewContent, ObjectStore),
 
-                                 ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+                                 %ets:insert(TentativeVersions, {Bkey, NewTentativeContents})
+
+                                 Metadata1 = dict:store(<<"transaction_id">>, Id, dict:new()),
+                                 Metadata = dict:store(<<"version">>, Timestamp, Metadata1),
+                                 store_new_object_version(Bkey, {Metadata, crypto:rand_bytes(1000)}, ObjectStore)
                          end,
             lists:foreach(ForEachFun, Puts);
 
@@ -1661,19 +1665,22 @@ do_commit_transaction(
     NewState.
 
 store_new_object_version({Bucket, Key} = Bkey, NewContent, ObjectStore) ->
-    case ets:lookup(ObjectStore, Bkey) of
-        [{Bkey, OldObject}] ->
-            %OldContents = riak_object:get_contents(OldObject),
-            %NewContents = append_content(OldContents, NewContent),
-            %NewObject = riak_object:set_contents(OldObject, NewContents),
-            %ets:insert(ObjectStore, {Bkey, NewObject});
-            Object = riak_object:set_contents(OldObject, [NewContent]),
-            ets:insert(ObjectStore, {Bkey, Object});
-        [] ->
-            Object1 = riak_object:new(Bucket, Key, nil),
-            Object = riak_object:set_contents(Object1, [NewContent]),
-            ets:insert(ObjectStore, {Bkey, Object})
-    end.
+    Object1 = riak_object:new(Bucket, Key, nil),
+    Object = riak_object:set_contents(Object1, [NewContent]),
+    ets:insert(ObjectStore, {Bkey, Object}).
+    %case ets:lookup(ObjectStore, Bkey) of
+        %[{Bkey, OldObject}] ->
+            %%OldContents = riak_object:get_contents(OldObject),
+            %%NewContents = append_content(OldContents, NewContent),
+            %%NewObject = riak_object:set_contents(OldObject, NewContents),
+            %%ets:insert(ObjectStore, {Bkey, NewObject});
+            %Object = riak_object:set_contents(OldObject, [NewContent]),
+            %ets:insert(ObjectStore, {Bkey, Object});
+        %[] ->
+            %Object1 = riak_object:new(Bucket, Key, nil),
+            %Object = riak_object:set_contents(Object1, [NewContent]),
+            %ets:insert(ObjectStore, {Bkey, Object})
+    %end.
 
 %append_content(OldContents, NewContent) ->
     %% Sort old contents in descending order
