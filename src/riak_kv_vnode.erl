@@ -509,6 +509,7 @@ init([Index]) ->
     ets:insert(Stats, {n_commits, 0}),
     ets:insert(Stats, {max_commit_execution_time, -1}),
     ets:insert(Stats, {min_commit_execution_time, -1}),
+    ets:insert(Stats, {last_request_timestamp, {0, 0, 0}}),
     erlang:send_after(60000, self(), print_stats),
 
     {ok, BatchSize} = application:get_env(riak_kv, transactions_batch_size),
@@ -823,15 +824,18 @@ handle_command(Req, Sender, State) ->
 %% @todo: pre record encapsulation there was no catch all clause in handle_command,
 %%        so crashing on unknown should work.
 handle_request(kv_transactional_get_request, Req, Sender, #state{stats = Stats} = State) ->
+    LastRequestTimestamp = ets:lookup_element(Stats, last_request_timestamp, 2),
+    BetweenRequestsTime = erlang:max(0, timer:now_diff(os:timestamp(), LastRequestTimestamp)),
+
     StartTimestamp = os:timestamp(),
-
     NewState = handle_transactional_get_request(Req, Sender, State),
-
     ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
     Random = random:uniform(100),
     case Random of
-        1 -> lager:info("get execution time ~p~n", [ExecutionTime]);
+        1 ->
+            lager:info("get execution time ~p~n", [ExecutionTime]),
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
         _ -> ok
     end,
 
@@ -850,17 +854,22 @@ handle_request(kv_transactional_get_request, Req, Sender, #state{stats = Stats} 
         true -> ok
     end,
 
+    ets:insert(Stats, {last_request_timestamp, os:timestamp()}),
+
     {noreply, NewState};
 handle_request(kv_prepare_transaction_request, Req, Sender, #state{stats = Stats} = State) ->
+    LastRequestTimestamp = ets:lookup_element(Stats, last_request_timestamp, 2),
+    BetweenRequestsTime = erlang:max(0, timer:now_diff(os:timestamp(), LastRequestTimestamp)),
+
     StartTimestamp = os:timestamp(),
-
     NewState = handle_prepare_transaction_request(Req, Sender, State),
-
     ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
     Random = random:uniform(100),
     case Random of
-        1 -> lager:info("prepare execution time ~p~n", [ExecutionTime]);
+        1 ->
+            lager:info("prepare execution time ~p~n", [ExecutionTime]),
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
         _ -> ok
     end,
 
@@ -879,9 +888,28 @@ handle_request(kv_prepare_transaction_request, Req, Sender, #state{stats = Stats
         true -> ok
     end,
 
+    ets:insert(Stats, {last_request_timestamp, os:timestamp()}),
+
     {noreply, NewState};
-handle_request(kv_batch_commit_transactions_request, Req, Sender, State) ->
+handle_request(kv_batch_commit_transactions_request, Req, Sender, #state{stats = Stats} = State) ->
+    LastRequestTimestamp = ets:lookup_element(Stats, last_request_timestamp, 2),
+    BetweenRequestsTime = erlang:max(0, timer:now_diff(os:timestamp(), LastRequestTimestamp)),
+
+    StartTimestamp = os:timestamp(),
     NewState = handle_batch_commit_transactions_request(Req, Sender, State),
+    ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
+
+    Random = random:uniform(100),
+    case Random of
+        1 ->
+            Batch = riak_kv_requests:get_batch(Req),
+            lager:info("batch (size ~p) execution time ~p~n", [length(Batch), ExecutionTime]),
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
+        _ -> ok
+    end,
+
+    ets:insert(Stats, {last_request_timestamp, os:timestamp()}),
+
     {noreply, NewState};
 handle_request(kv_put_request, Req, Sender, #state{idx = Idx} = State) ->
     StartTS = os:timestamp(),
