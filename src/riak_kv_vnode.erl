@@ -510,6 +510,7 @@ init([Index]) ->
     ets:insert(Stats, {max_commit_execution_time, -1}),
     ets:insert(Stats, {min_commit_execution_time, -1}),
     ets:insert(Stats, {last_request_timestamp, {0, 0, 0}}),
+    ets:insert(Stats, {current_period_timestamp, {0, 0, 0}}),
     erlang:send_after(60000, self(), print_stats),
 
     {ok, BatchSize} = application:get_env(riak_kv, transactions_batch_size),
@@ -831,12 +832,17 @@ handle_request(kv_transactional_get_request, Req, Sender, #state{stats = Stats} 
     NewState = handle_transactional_get_request(Req, Sender, State),
     ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
-    Random = random:uniform(100),
-    case Random of
-        1 ->
-            lager:info("get execution time ~p~n", [ExecutionTime]),
-            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
-        _ -> ok
+    CurrentPeriodTimestamp = ets:lookup_element(Stats, current_period_timestamp, 2),
+    Diff = erlang:max(0, timer:now_diff(os:timestamp(), CurrentPeriodTimestamp)),
+    if
+        Diff < 5000000 ->
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]),
+            lager:info("get execution time ~p~n", [ExecutionTime]);
+        Diff > 25000000 ->
+            lager:info("########## PERIOD END ##########~n", []),
+            ets:insert(Stats, {current_period_timestamp, os:timestamp()});
+        true ->
+            ok
     end,
 
     ets:update_counter(Stats, n_gets, 1),
@@ -865,12 +871,17 @@ handle_request(kv_prepare_transaction_request, Req, Sender, #state{stats = Stats
     NewState = handle_prepare_transaction_request(Req, Sender, State),
     ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
-    Random = random:uniform(100),
-    case Random of
-        1 ->
-            lager:info("prepare execution time ~p~n", [ExecutionTime]),
-            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
-        _ -> ok
+    CurrentPeriodTimestamp = ets:lookup_element(Stats, current_period_timestamp, 2),
+    Diff = erlang:max(0, timer:now_diff(os:timestamp(), CurrentPeriodTimestamp)),
+    if
+        Diff < 5000000 ->
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]),
+            lager:info("prepare execution time ~p~n", [ExecutionTime]);
+        Diff > 25000000 ->
+            lager:info("########## PERIOD END ##########~n", []),
+            ets:insert(Stats, {current_period_timestamp, os:timestamp()});
+        true ->
+            ok
     end,
 
     ets:update_counter(Stats, n_prepares, 1),
@@ -899,13 +910,18 @@ handle_request(kv_batch_commit_transactions_request, Req, Sender, #state{stats =
     NewState = handle_batch_commit_transactions_request(Req, Sender, State),
     ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
-    Random = random:uniform(100),
-    case Random of
-        1 ->
+    CurrentPeriodTimestamp = ets:lookup_element(Stats, current_period_timestamp, 2),
+    Diff = erlang:max(0, timer:now_diff(os:timestamp(), CurrentPeriodTimestamp)),
+    if
+        Diff < 5000000 ->
+            lager:info("between requests time ~p~n", [BetweenRequestsTime]),
             Batch = riak_kv_requests:get_batch(Req),
-            lager:info("batch (size ~p) execution time ~p~n", [length(Batch), ExecutionTime]),
-            lager:info("between requests time ~p~n", [BetweenRequestsTime]);
-        _ -> ok
+            lager:info("batch (size ~p) execution time ~p~n", [length(Batch), ExecutionTime]);
+        Diff > 25000000 ->
+            lager:info("########## PERIOD END ##########~n", []),
+            ets:insert(Stats, {current_period_timestamp, os:timestamp()});
+        true ->
+            ok
     end,
 
     ets:insert(Stats, {last_request_timestamp, os:timestamp()}),
@@ -1713,10 +1729,16 @@ handle_batch_commit_transactions_request(Req, _Sender, #state{idx = _Idx, stats 
 
                         ExecutionTime = erlang:max(0, timer:now_diff(os:timestamp(), StartTimestamp)),
 
-                        Random = random:uniform(100),
-                        case Random of
-                            1 -> lager:info("commit execution time ~p~n", [ExecutionTime]);
-                            _ -> ok
+                        CurrentPeriodTimestamp = ets:lookup_element(Stats, current_period_timestamp, 2),
+                        Diff = erlang:max(0, timer:now_diff(os:timestamp(), CurrentPeriodTimestamp)),
+                        if
+                            Diff < 5000000 ->
+                                lager:info("commit execution time ~p~n", [ExecutionTime]);
+                            Diff > 25000000 ->
+                                lager:info("########## PERIOD END ##########~n", []),
+                                ets:insert(Stats, {current_period_timestamp, os:timestamp()});
+                            true ->
+                                ok
                         end,
 
                         ets:update_counter(Stats, n_commits, 1),
